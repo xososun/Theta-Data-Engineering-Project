@@ -3,6 +3,21 @@
 DSS150P Data Engineering project. Full problem statement, objectives, and
 architecture: see `docs/project_proposal.md`.
 
+The following dataset needs to be downloaded on your side, as the
+files are unable to be uploaded and added to this repository:
+
+UK Road Safety Data Collisions - Last 5 Years (CSV):
+
+https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-collision-last-5-years.csv
+
+Chicago Traffic Crashes (CSV):
+
+https://data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if/about_data
+
+Alternative:
+https://data.cityofchicago.org/resource/85ca-t3if.json
+
+
 ## Status
 
 This repository currently contains the **design and profiling phase**
