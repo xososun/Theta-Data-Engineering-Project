@@ -11,6 +11,7 @@
 source_id: chicago_us
 provider: City of Chicago Data Portal (Socrata)
 dataset_url: https://data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if
+api_endpoint: https://data.cityofchicago.org/resource/85ca-t3if.json
 format: csv          # bulk export; API retrieval (JSON) is the programmatic-source stretch goal
 license: Public domain / open data (Chicago Data Portal terms)
 city: Chicago
