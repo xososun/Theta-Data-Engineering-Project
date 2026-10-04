@@ -143,15 +143,15 @@ def _write_report(results: dict, rows: int, source_id: str, year: int, month: in
 
     lines.append("\n## Interpretation\n")
     lines.append(
-        "- **Parquet** is smallest (columnar layout + compression), fastest to "
-        "write, and fastest to read back on this sample. Its columnar format lets "
-        "readers fetch only the columns an analysis needs, and it stores data in a "
-        "compact binary layout instead of text, so both disk and parse costs drop."
+        "- **Parquet** is smallest (columnar layout + compression), fastest to write, "
+        "and fastest to read back on this sample. Its columnar format lets readers "
+        "fetch only the columns an analysis needs, and it stores data in a compact "
+        "binary layout instead of text, so both disk and parse costs drop."
     )
     lines.append(
-        "- **CSV** is mid-size and reasonably fast to parse because pandas' C "
-        "parser is highly optimized, but it carries no type information, uses more "
-        "bytes per value, and cannot skip columns that an analysis doesn't need."
+        "- **CSV** is mid-size and reasonably fast to parse because pandas' C parser "
+        "is highly optimized, but it carries no type information, uses more bytes per "
+        "value, and cannot skip columns that an analysis doesn't need."
     )
     lines.append(
         "- **JSON** is the largest here (keys repeat on every record) and mid-speed. "
