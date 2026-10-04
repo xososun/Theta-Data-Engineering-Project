@@ -6,9 +6,11 @@ architecture: see `docs/project_proposal.md`.
 ## Status
 
 This repository currently contains the **design and profiling phase**
-artifacts. The automated ingestion/transformation/orchestration pipeline
-itself has not been built yet — see "What's not built yet" below before
-assuming anything beyond what's listed as done.
+artifacts, plus the **full transformation, validation, and load
+pipeline** built by Member B. The automated ingestion/transformation/orchestration
+pipeline itself has been built for ingestion (Member A) and
+transformation/validation/load (Member B); Airflow DAGs, diagrams, and
+analytics remain (Member C).
 
 ### What's actually done
 - **Source profiling**, run against full or near-full real data for all
@@ -59,6 +61,55 @@ assuming anything beyond what's listed as done.
     the mocked tests in `tests/test_nyc_extractor.py`). Error-handling
     paths (missing file, malformed file, missing year, ambiguous
     filename) were verified separately against realistic bad inputs.
+- **Staging transformation for all three sources** (`src/transform/`):
+  - `staging.py` — config-driven raw→staging transform. Reads each
+    adapter YAML's `field_mapping` and executes it. Mapping primitives:
+    `from`, `literal`, `map`, `derive_fn` (named function from
+    `derivations.py` for non-trivial per-source logic).
+  - `derivations.py` — named helper functions for per-source derived
+    fields (Chicago/NYC/UK `has_valid_coordinates`, NYC severity and
+    vehicle counting from components, crash-id construction).
+  - Sentinel `(0,0)` coordinates are nulled at staging time (74 Chicago
+    rows, 34 NYC rows) rather than left as fake points.
+  - All three adapters include `source_id` and `source_local_timezone`
+    literals so those required canonical fields are populated.
+  - Verified end-to-end: Chicago 1,096,581, UK 513,801, NYC 1,793 rows;
+    raw→staged counts match exactly.
+- **8 automated data-quality checks** (`src/validation/checks.py`):
+  schema, nullability, uniqueness, accepted values, ranges, date logic,
+  referential integrity, row counts. Every check writes a row to
+  `dq_run_log`. Source-specific structural gaps are encoded so documented
+  nulls do not register as failures. A single documented Chicago anomaly
+  (1 row with inverted police-notification timestamp) is tolerated via a
+  per-source tolerance. Verified: 22 pass, 2 warn, 0 fail across all
+  three sources.
+- **Curated harmonization + partitioned Parquet**
+  (`src/transform/curated.py`): reads all three staging batches, casts
+  columns to canonical types, parses per-source timestamp strings into
+  UTC-aware datetimes, adds `crash_date_key` (FK to `dim_date`), writes
+  partitioned Parquet at
+  `data/curated/fact_crash/source_id=<id>/year=<YYYY>/month=<MM>/`.
+  `read_partition(source_id, year, month)` uses pyarrow.dataset with a
+  filter, demonstrating partition-pruned reads. Verified: 1,611,920 rows
+  across 208 partition files; `read_partition("chicago_us", 2024, 3)`
+  returns 8,924 rows without scanning the full dataset.
+- **Postgres load with idempotent UPSERT** (`src/load/load_postgres.py`):
+  populates `dim_date` (ON CONFLICT DO NOTHING), UPSERTs `fact_crash`
+  on `(source_id, source_record_id)` using
+  `psycopg2.extras.execute_values`. A `_to_pg_val` coercion catches all
+  pandas missing-value flavours (`None`, `NaN`, `pd.NA`, `pd.NaT`)
+  before send. Verified: 1,611,920 rows loaded; re-running leaves row
+  counts unchanged.
+- **CSV / JSON / Parquet benchmark** (`src/transform/format_compare.py`):
+  writes the same curated slice as all three formats, measures size and
+  read/write time, emits a Markdown report to
+  `data/curated/format_benchmark/format_benchmark.md`. Parquet is
+  smallest (2.48 MB) and fastest on write and read; CSV 2.0× larger;
+  JSON 3.8× larger.
+- **Unit tests** (`tests/test_staging.py`, `tests/test_validation.py`):
+  8 tests for the staging mapping primitives and sentinel handling;
+  12 tests for the DQ check logic including structural gap skipping and
+  anomaly tolerance.
 - **Docker environment**: `Dockerfile` (extends the official Airflow image
   with this project's code/dependencies, also usable standalone for manual
   extractor runs), `docker-compose.yml` (Postgres + Airflow webserver/
@@ -77,17 +128,14 @@ assuming anything beyond what's listed as done.
   directly.
 
 ### What's NOT built yet
-- Raw → staging → curated transformation code implementing the adapter
-  mappings (the YAML configs describe the mapping; nothing executes it yet).
-- The 5+ automated data-quality checks as running code (the *rules* are
-  documented in the adapters and schema; `dq_run_log` exists as a table with
-  no writer yet).
-- Airflow DAGs (`dags/` is currently an empty placeholder).
-- Partitioning implementation (Parquet output, partition-pruned reads).
+- Airflow DAGs (`dags/` is currently an empty placeholder — Member C's
+  workstream).
 - Data contract document (distinct from the data dictionary).
 - Architecture, data-flow/lineage, and ERD diagrams.
-- Tests (`tests/` is an empty placeholder).
 - Analytics/EDA/clustering notebooks.
+- `fact_person` and `fact_vehicle` tables (mentioned in the proposal;
+  not implemented in v1; the canonical schema and DDL focus on
+  `fact_crash`).
 
 ## Data Layers
 
@@ -104,8 +152,13 @@ assuming anything beyond what's listed as done.
   genuine source files, and defeats the point of raw-layer traceability
   (raw/ is supposed to mean "an extractor produced this, with a
   manifest," not "a human put a file somewhere").
-- **`data/staging/`**, **`data/curated/`** — not yet populated (transformation
-  code not yet built; see Member B's workstream in `TASKS.md`).
+- **`data/staging/`** — pipeline-managed Parquet produced by
+  `src/transform/staging.py`. One `fact_crash.parquet` per source per
+  batch. Cleaned, typed, standardized to the canonical schema.
+- **`data/curated/`** — pipeline-managed partitioned Parquet produced by
+  `src/transform/curated.py`. Layout:
+  `fact_crash/source_id=<id>/year=<YYYY>/month=<MM>/part-0.parquet`.
+  Also contains `format_benchmark/` for the format comparison report.
 
 ## Running the Extractors
 
@@ -127,70 +180,3 @@ docker compose run --rm pipeline python src/extract/nyc_extractor.py --since 202
 
 # Inspect a batch's manifest (substitute your real batch folder name)
 docker compose run --rm pipeline cat /opt/airflow/data/raw/chicago_us/<batch_id>/manifest.json
-```
-
-Batch folders are named like `chicago_us_20261002T092840Z_9b8ac00a`
-(`<source_id>_<UTC timestamp>_<short id>`). Use `--help` on any extractor
-for the full list of options.
-
-## Repository Structure
-
-```
-project/
-├── README.md                  # this file
-├── STARTUP_GUIDE.md           # setup + how to run everything (start here)
-├── Dockerfile                  # extends apache/airflow with this project's code/deps
-├── docker-compose.yml          # Postgres + Airflow + pipeline runner (tested end-to-end)
-├── .env.example                 # config template, no real secrets
-├── .gitignore
-├── requirements.txt
-├── config/
-│   ├── canonical_schema.yaml   # the shared schema every source maps into
-│   └── adapters/
-│       ├── chicago.yaml
-│       ├── nyc.yaml
-│       └── uk.yaml
-├── docs/
-│   ├── project_proposal.md     # problem statement, objectives, architecture
-│   └── data_dictionary.md      # field-level reference incl. per-source gaps
-├── sql/
-│   └── schema.sql              # PostgreSQL DDL (auto-applied by Docker on first Postgres start)
-├── src/
-│   ├── extract/
-│   │   ├── chicago_extractor.py  # bulk CSV → raw layer
-│   │   ├── uk_extractor.py       # 5-year multi-file → raw layer, per-year failure isolation
-│   │   └── nyc_extractor.py      # paginated API → raw layer, retries + backoff
-│   ├── profiling/
-│   │   └── profile_crashes.py   # Chicago source profiling script
-│   ├── utils/
-│   │   ├── batch.py              # batch ID generation
-│   │   ├── raw_writer.py         # byte-for-byte raw-layer writer + manifest.json
-│   │   └── config.py             # adapter YAML loader
-│   ├── transform/                # empty — not yet built
-│   ├── load/                     # empty — not yet built
-│   └── validation/               # empty — not yet built
-├── data/
-│   ├── incoming/                 # LOCAL drop zone for downloaded source files (gitignored)
-│   ├── raw/                     # pipeline-managed only (gitignored contents) — see "Data Layers" above
-│   ├── staging/                  # empty — not yet populated
-│   └── curated/                  # empty — not yet populated
-├── dags/                         # empty — Airflow DAGs not yet written
-├── notebooks/                    # empty — analytics not yet started
-└── tests/
-    └── test_nyc_extractor.py     # mocked-API tests for retry/error-handling logic
-```
-
-`src/profiling/` is a deviation from the course's suggested layout (which
-lists `extract/transform/load/validation/utils` under `src/`) added to keep
-one-off source-profiling scripts separate from pipeline-integrated
-validation checks that will run inside the DAG. Documented here since the
-guidelines ask for an explanation wherever the structure differs.
-
-## Next Steps
-
-Member A's workstream (ingestion + environment) is complete. The next
-planned items are Member B's: build the staging transformation that
-executes the adapter mappings, then the curated layer and automated
-data-quality checks. Member C can start the DAG skeleton, diagrams, and
-data contract in parallel. See `TASKS.md` for the full breakdown and
-ownership.

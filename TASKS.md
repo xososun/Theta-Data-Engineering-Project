@@ -25,18 +25,23 @@ defense, so skim the other two sections even if they aren't yours.
 ## Member B — Transformation, Validation & Database
 *Needs Member A's raw layer (even a stub/sample) to transform against.*
 
-- [ ] Staging transformation code that executes each adapter YAML's `field_mapping` (shared logic across sources, not copy-pasted per source)
-- [ ] Curated-layer harmonization into the canonical schema
-- [X] Run `sql/schema.sql` against a real PostgreSQL instance
-- [ ] Implement 5+ automated data-quality checks as running code, writing results to `dq_run_log`:
-  - [ ] Schema check
-  - [ ] Nullability check
-  - [ ] Uniqueness / duplicate check
-  - [ ] Accepted-values check (severity, etc.)
-  - [ ] Range check (coordinates, speed limit, dates not in future)
-- [ ] Rerun-safety: UPSERT on `(source_id, source_record_id)` into Postgres
-- [ ] Partitioning: write curated output to Parquet, partitioned by `source_id/year/month`
-- [ ] Demonstrate reading a single partition without a full scan
+- [x] Staging transformation code that executes each adapter YAML's `field_mapping` (shared logic across sources, not copy-pasted per source) — (MB, 2026-10-05)
+- [x] Curated-layer harmonization into the canonical schema — (MB, 2026-10-05)
+- [x] Run `sql/schema.sql` against a real PostgreSQL instance — (MB, 2026-10-04)
+- [x] Implement 8 automated data-quality checks as running code, writing results to `dq_run_log`:
+  - [x] Schema check
+  - [x] Nullability check
+  - [x] Uniqueness / duplicate check
+  - [x] Accepted-values check (severity, etc.)
+  - [x] Range check (coordinates, speed limit, dates not in future)
+  - [x] Date-logic check (with per-source tolerance for documented anomalies)
+  - [x] Referential-integrity check
+  - [x] Row-count reconciliation check
+- [x] Rerun-safety: UPSERT on `(source_id, source_record_id)` into Postgres — (MB, 2026-10-05)
+- [x] Partitioning: write curated output to Parquet, partitioned by `source_id/year/month` — (MB, 2026-10-05)
+- [x] Demonstrate reading a single partition without a full scan — (MB, 2026-10-05)
+- [x] CSV / JSON / Parquet handling + size and performance comparison — (MB, 2026-10-05)
+- [x] Postgres load of 1,611,920 rows with verified idempotency — (MB, 2026-10-05)
 
 ## Member C — Orchestration, Diagrams & Analytics
 *Can start diagrams/DAG skeleton immediately from existing schema/adapters; needs real data for the notebook.*
