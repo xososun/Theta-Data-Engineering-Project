@@ -27,7 +27,7 @@ defense, so skim the other two sections even if they aren't yours.
 
 - [ ] Staging transformation code that executes each adapter YAML's `field_mapping` (shared logic across sources, not copy-pasted per source)
 - [ ] Curated-layer harmonization into the canonical schema
-- [ ] Run `sql/schema.sql` against a real PostgreSQL instance
+- [X] Run `sql/schema.sql` against a real PostgreSQL instance
 - [ ] Implement 5+ automated data-quality checks as running code, writing results to `dq_run_log`:
   - [ ] Schema check
   - [ ] Nullability check
