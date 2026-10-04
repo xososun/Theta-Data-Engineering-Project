@@ -1,7 +1,6 @@
 # adapters/nyc.yaml
 #
-# Source adapter for the NYC Motor Vehicle Collisions - Crashes dataset
-# (Socrata dataset h9gi-nx95).
+# Source adapter for the NYC Motor Vehicle Collisions - Crashes dataset.
 
 source_id: nyc_us
 provider: NYC OpenData (Socrata)
@@ -25,6 +24,10 @@ pagination:
   order_by: "crash_date DESC, collision_id DESC"
 
 field_mapping:
+  source_id:
+    literal: nyc_us
+  source_local_timezone:
+    literal: America/New_York
   crash_id:
     derive_fn: nyc_crash_id
   source_record_id:

@@ -204,6 +204,27 @@ def _apply_field(field_name: str, spec: dict, df: pd.DataFrame, adapter: dict) -
     raise ValueError(f"Field {field_name!r} has no recognised mapping spec: {spec}")
 
 
+# ---------- Post-mapping fixups ----------
+
+def _null_sentinel_coordinates(out: pd.DataFrame) -> pd.DataFrame:
+    """
+    If latitude and longitude are both exactly 0, the source used (0,0)
+    as a 'no coordinates recorded' sentinel (documented in chicago.yaml
+    and nyc.yaml known_issues). Treat those as missing rather than as
+    real points in the Gulf of Guinea.
+    """
+    if "latitude" in out.columns and "longitude" in out.columns:
+        lat = pd.to_numeric(out["latitude"], errors="coerce")
+        lon = pd.to_numeric(out["longitude"], errors="coerce")
+        sentinel = (lat == 0) & (lon == 0)
+        n = int(sentinel.sum())
+        if n > 0:
+            out.loc[sentinel, "latitude"] = pd.NA
+            out.loc[sentinel, "longitude"] = pd.NA
+            print(f"[staging] nulled {n} sentinel (0,0) coordinate rows")
+    return out
+
+
 # ---------- Public entry point ----------
 
 def stage(source_id: str, batch_id: str) -> dict:
@@ -225,6 +246,8 @@ def stage(source_id: str, batch_id: str) -> dict:
     for field_name in canonical_fields:
         if field_name not in out.columns:
             out[field_name] = pd.NA
+
+    out = _null_sentinel_coordinates(out)
 
     out = out[canonical_fields]
 

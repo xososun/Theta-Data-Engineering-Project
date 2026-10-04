@@ -38,6 +38,10 @@ columns_using_null_sentinel:
   - local_authority_district
 
 field_mapping:
+  source_id:
+    literal: uk_stats19
+  source_local_timezone:
+    literal: Europe/London
   crash_id:
     derive_fn: uk_crash_id
   source_record_id:

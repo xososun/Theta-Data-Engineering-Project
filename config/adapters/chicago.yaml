@@ -19,6 +19,10 @@ bounding_box:
   longitude: [-87.95, -87.50]
 
 field_mapping:
+  source_id:
+    literal: chicago_us
+  source_local_timezone:
+    literal: America/Chicago
   crash_id:
     derive_fn: chicago_crash_id
   source_record_id:
