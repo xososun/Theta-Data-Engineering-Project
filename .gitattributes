@@ -1,2 +1,0 @@
-data/raw/** filter=lfs diff=lfs merge=lfs -text
-data/incoming/** filter=lfs diff=lfs merge=lfs -text
