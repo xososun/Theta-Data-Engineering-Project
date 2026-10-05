@@ -1,0 +1,64 @@
+erDiagram
+    dim_source ||--o{ fact_crash : "source_id"
+    dim_source ||--o{ dq_run_log : "source_id"
+    dim_date   ||--o{ fact_crash : "crash_date_key"
+
+    dim_source {
+        TEXT     source_id           PK "chicago_us | nyc_us | uk_stats19"
+        TEXT     provider            "NOT NULL"
+        TEXT     dataset_url
+        TEXT     city                "NULL for uk_stats19 (national)"
+        CHAR2    country             "NOT NULL, ISO 3166-1 alpha-2"
+        TEXT     source_local_timezone "NOT NULL, IANA tz"
+        TEXT     license
+        TIMESTAMPTZ created_at       "NOT NULL DEFAULT now()"
+    }
+
+    dim_date {
+        DATE     date_key            PK
+        SMALLINT year                "NOT NULL"
+        SMALLINT month               "NOT NULL"
+        SMALLINT day                 "NOT NULL"
+        SMALLINT day_of_week         "NOT NULL, 0=Mon..6=Sun"
+        BOOLEAN  is_weekend          "NOT NULL"
+    }
+
+    fact_crash {
+        TEXT     crash_id            PK "source_id:source_record_id"
+        TEXT     source_id           FK "NOT NULL"
+        TEXT     source_record_id    "NOT NULL, natural key part"
+        TIMESTAMPTZ crash_timestamp_utc "NOT NULL"
+        DATE     crash_date_key      FK "NOT NULL"
+        TIMESTAMPTZ police_notified_timestamp_utc "NULL for nyc_us, uk_stats19"
+        TEXT     city                "NULL for uk_stats19"
+        CHAR2    country             "NOT NULL"
+        DOUBLE   latitude            "NULL if missing/sentinel"
+        DOUBLE   longitude           "NULL if missing/sentinel"
+        BOOLEAN  has_valid_coordinates "NOT NULL DEFAULT FALSE"
+        TEXT     severity            "NOT NULL, CHECK in (fatal|serious|minor|none|unknown)"
+        TEXT     source_severity_raw "audit trail"
+        INTEGER  num_injured_total   "CHECK >= 0"
+        INTEGER  num_killed          "CHECK >= 0; NULL for uk_stats19"
+        INTEGER  num_vehicles_involved "CHECK >= 0"
+        TEXT     crash_type          "NULL for nyc_us, uk_stats19"
+        TEXT     primary_cause       "NULL for uk_stats19"
+        TEXT     weather_condition   "NULL for nyc_us"
+        TEXT     lighting_condition  "NULL for nyc_us"
+        INTEGER  posted_speed_limit_mph "NULL for nyc_us"
+        BOOLEAN  hit_and_run         "NOT NULL DEFAULT FALSE; reliable only for chicago_us"
+        TIMESTAMPTZ ingested_at_utc  "NOT NULL DEFAULT now()"
+        TEXT     batch_id            "NOT NULL"
+        TEXT     source_row_raw_ref  "lineage pointer to raw layer"
+    }
+
+    dq_run_log {
+        BIGSERIAL id                 PK
+        TEXT     batch_id            "NOT NULL"
+        TEXT     source_id           FK "nullable"
+        TEXT     check_name          "NOT NULL"
+        TEXT     status              "NOT NULL, CHECK in (pass|fail|warn)"
+        BIGINT   rows_checked        "NOT NULL DEFAULT 0"
+        BIGINT   rows_failed         "NOT NULL DEFAULT 0"
+        TEXT     details             "free-text summary"
+        TIMESTAMPTZ run_timestamp   "NOT NULL DEFAULT now()"
+    }

@@ -1,0 +1,14 @@
+# Shared across extraction, profiling, and (later) transformation code.
+# Airflow itself is NOT listed here - the airflow image already provides
+# it; this file is pip-installed on top of the base airflow image (see
+# Dockerfile) and is also sufficient on its own for running extractors
+# standalone outside of Airflow, without Airflow's dependency weight.
+
+PyYAML>=6.0
+pandas>=2.2
+psycopg2-binary>=2.9
+pyarrow>=16.0          # Parquet read/write for the curated/partitioned layer
+requests>=2.31          # production HTTP client (nyc_extractor uses stdlib urllib
+                         # directly today to avoid the dependency during profiling;
+                         # kept here for transform/load code that may want it)
+pytest>=8.0              # test runner for tests/
