@@ -57,7 +57,7 @@ Then check:
 Datasets are **not** in the repo (gitignored). Each person downloads them locally.
 
 - **Chicago:** the bulk "Traffic Crashes - Crashes" CSV
-- **UK STATS19:** the 5 annual files, 2021–2025
+- **UK STATS19:** the 5 annual files, 2021–2025 (Collisions only)
 - **NYC:** pulled live from the Socrata API, so no download is needed
 
 Put downloaded files in `data/incoming/` (host machine). This is the local drop zone.
