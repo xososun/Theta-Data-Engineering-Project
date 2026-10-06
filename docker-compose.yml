@@ -147,6 +147,7 @@ services:
       - ./data:/opt/airflow/data
       - ./sql:/opt/airflow/sql
       - ./tests:/opt/airflow/tests
+      - ./dags:/opt/airflow/dags
     entrypoint: []
     # ^ Deliberately empty, NOT "/bin/bash". With entrypoint set to a bare
     #   /bin/bash and no "-c", the command you pass to `docker compose run`
