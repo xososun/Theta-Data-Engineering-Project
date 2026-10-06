@@ -195,7 +195,11 @@ def _apply_field(field_name: str, spec: dict, df: pd.DataFrame, adapter: dict) -
                 pass
 
         if "map" in spec:
-            mapping = spec["map"]
+            # Raw CSVs are read as text, so a value arrives as "1" while a
+            # YAML key written as 1 is an int. Add a string form of every
+            # key so both match; otherwise every row falls to the default.
+            mapping = {**spec["map"],
+                       **{str(k): v for k, v in spec["map"].items() if k is not None}}
             default = spec.get("default")
             series = series.apply(lambda v: _apply_map(v, mapping, default))
 

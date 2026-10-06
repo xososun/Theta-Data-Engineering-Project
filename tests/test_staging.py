@@ -96,3 +96,14 @@ def test_uk_crash_id_format():
     spec = {"derive_fn": "uk_crash_id"}
     result = _apply_field("crash_id", spec, df, ADAPTER_STUB)
     assert list(result) == ["uk_stats19:2024A1", "uk_stats19:2024A2"]
+
+def test_map_matches_int_keys_against_text_values():
+    """UK severity codes arrive as text ("1") but the YAML keys are ints (1)."""
+    df = pd.DataFrame({"collision_severity": ["1", "2", "3", None]})
+    spec = {
+        "from": "collision_severity",
+        "map": {1: "fatal", 2: "serious", 3: "minor", None: "unknown"},
+        "default": "unknown",
+    }
+    result = _apply_field("severity", spec, df, ADAPTER_STUB)
+    assert list(result) == ["fatal", "serious", "minor", "unknown"]
