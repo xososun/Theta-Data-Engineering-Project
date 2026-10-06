@@ -14,10 +14,10 @@ Mermaid Support extension, and on GitHub when this file is viewed there.
 
 **Source:** [`diagrams/architecture.mmd`](diagrams/architecture.mmd)
 
-Covers: sources → ingestion → raw → validation → staging → harmonization →
-curated → Postgres + Parquet → consumption, with Airflow as the
+Covers: sources → ingestion → raw → staging → validation → harmonization
+→ curated Parquet → load → PostgreSQL → consumption, with Airflow as the
 orchestration layer, Docker Compose as the runtime, YAML as config, and
-Git as version control.
+Git as version control. Each box names the module that implements it.
 
 ```mermaid
 flowchart TB
@@ -28,59 +28,59 @@ flowchart TB
         S3["UK STATS19 Collisions<br/>(5 annual CSVs, 2021–2025)"]
     end
 
-    subgraph ING["Ingestion — per-source adapter, config-driven"]
+    subgraph ING["Ingestion — src/extract/, one extractor per source"]
         direction LR
-        A1["chicago_extractor.py<br/>byte-for-byte copy"]
-        A2["nyc_extractor.py<br/>retries + compound pagination"]
-        A3["uk_extractor.py<br/>per-year failure isolation"]
+        A1["chicago_extractor.py<br/>byte-for-byte copy<br/>file check: UTF-8, header row"]
+        A2["nyc_extractor.py<br/>retries + backoff · compound pagination<br/>90-day window ending at newest published date<br/>0 rows = failure"]
+        A3["uk_extractor.py<br/>per-year failure isolation<br/>file check: UTF-8, header row"]
     end
 
-    subgraph RAW["RAW Layer — source-faithful, no transformation"]
+    subgraph RAW["RAW Layer — source-faithful, never overwritten"]
         direction LR
-        R1["data/raw/&lt;source_id&gt;/&lt;batch_id&gt;/<br/>original files + manifest.json"]
+        R1["data/raw/&lt;source_id&gt;/&lt;batch_id&gt;/<br/>original files + manifest.json<br/>(retrieved_at_utc · sha256 per file)"]
     end
 
-    subgraph VAL1["Raw Validation"]
+    subgraph STG["STAGING Layer — src/transform/staging.py, per source"]
         direction LR
-        V1["File readability, encoding,<br/>header sanity, row counts"]
+        ST1["Apply adapter field_mapping<br/>(from · literal · map · derive_fn)<br/>→ canonical column names<br/>null sentinels: -1 and (0,0) → null"]
     end
 
-    subgraph STG["STAGING Layer — per-source cleaning"]
+    subgraph VAL["Validation — src/validation/checks.py, per batch"]
         direction LR
-        ST1["Type conversion · date parsing<br/>null sentinel translation (-1, (0,0))<br/>dedup · category standardization"]
+        V1["8 automated checks<br/>schema · nullability · uniqueness · accepted values<br/>range · date logic · referential · row count<br/>results → dq_run_log · any fail stops the run"]
     end
 
-    subgraph VAL2["Validation — 5+ automated checks"]
+    subgraph HARM["Harmonization — src/transform/curated.py, all sources at once"]
         direction LR
-        V2["Schema · Nullability · Uniqueness<br/>Accepted values · Range ·<br/>Row-count reconciliation"]
+        H1["Parse timestamps · local time → UTC<br/>cast canonical types · crash_date_key<br/>(DST-ambiguous times excluded)"]
     end
 
-    subgraph HARM["Harmonization — adapter YAML mappings"]
+    subgraph CUR["CURATED Layer — canonical schema (25 fields)"]
         direction LR
-        H1["config/adapters/*.yaml<br/>field maps · value translations<br/>→ canonical schema"]
+        C1["Partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month=<br/>rebuilt each run"]
     end
 
-    subgraph CUR["CURATED Layer — canonical schema"]
+    subgraph LOAD["Load — src/load/load_postgres.py"]
         direction LR
-        C1["config/canonical_schema.yaml<br/>fact_crash (27 canonical fields)"]
+        L1["UPSERT on (source_id, source_record_id)<br/>dim_date first, then fact_crash"]
     end
 
-    subgraph OUT["Outputs"]
+    subgraph OUT["Storage & Reporting"]
         direction LR
         O1[("PostgreSQL<br/>fact_crash · dim_source<br/>dim_date · dq_run_log")]
-        O2["Partitioned Parquet<br/>source_id/year/month"]
+        O2["quality_report.py<br/>data/quality_reports/*.md"]
     end
 
     subgraph CONS["Consumption"]
         direction LR
         K1["SQL queries<br/>(analyst)"]
         K2["EDA notebook<br/>temporal · severity"]
-        K3["Clustering notebook<br/>DBSCAN / HDBSCAN hotspots"]
+        K3["Clustering notebook<br/>DBSCAN hotspots"]
     end
 
     subgraph ORCH["Orchestration & Runtime"]
         direction LR
-        OR1["Apache Airflow<br/>DAG: extract → validate →<br/>stage → validate → harmonize →<br/>load → publish → report"]
+        OR1["Apache Airflow — DAG crash_pipeline<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → load → quality_report<br/>weekly · 2 retries · report runs ALL_DONE"]
         OR2["Docker Compose<br/>postgres · airflow-webserver<br/>airflow-scheduler · pipeline"]
         OR3["YAML configs<br/>adapters · canonical schema"]
         OR4["Git / GitHub<br/>version control"]
@@ -93,31 +93,31 @@ flowchart TB
     A1 --> R1
     A2 --> R1
     A3 --> R1
-    R1 --> V1
-    V1 --> ST1
-    ST1 --> V2
-    V2 --> H1
+    R1 --> ST1
+    ST1 --> V1
+    V1 -->|"all sources pass"| H1
     H1 --> C1
-    C1 --> O1
-    C1 --> O2
+    C1 --> L1
+    L1 --> O1
+    V1 -->|"check results"| O1
+    O1 --> O2
     O1 --> K1
     O1 --> K2
-    O1 --> K3
-    O2 --> K2
-    O2 --> K3
+    C1 --> K2
+    C1 --> K3
 
     %% Orchestration / runtime (dashed = wraps, not data flow)
     OR1 -. orchestrates .-> ING
-    OR1 -. orchestrates .-> VAL1
     OR1 -. orchestrates .-> STG
-    OR1 -. orchestrates .-> VAL2
+    OR1 -. orchestrates .-> VAL
     OR1 -. orchestrates .-> HARM
-    OR1 -. orchestrates .-> OUT
+    OR1 -. orchestrates .-> LOAD
+    OR1 -. orchestrates .-> O2
     OR2 -. hosts .-> OR1
     OR2 -. hosts .-> O1
     OR3 -. configures .-> ING
-    OR3 -. configures .-> HARM
-    OR3 -. configures .-> C1
+    OR3 -. configures .-> STG
+    OR3 -. configures .-> VAL
     OR4 -. versions .-> OR1
     OR4 -. versions .-> OR3
 
@@ -135,22 +135,37 @@ flowchart TB
     class S1,S2,S3 srcStyle
     class A1,A2,A3 ingStyle
     class R1 rawStyle
-    class V1,V2 valStyle
+    class V1 valStyle
     class ST1 stgStyle
     class H1,C1 curStyle
-    class O1,O2 outStyle
+    class L1,O1,O2 outStyle
     class K1,K2,K3 consStyle
     class OR1,OR2,OR3,OR4 orchStyle
 ```
 
 **Reading this diagram:** Solid arrows are data flow; dashed arrows are
 orchestration/runtime relationships (Airflow *schedules* the stages, it
-is not itself a data stage). The two validation bands are distinct: the
-first checks raw-file integrity (is this actually a readable CSV?), the
-second enforces the 5+ data-quality rules from proposal section 8. The
-curated layer has two output targets — Postgres for SQL access and
-Parquet for columnar analytical reads — both fed from the same canonical
-schema.
+is not itself a data stage).
+
+- **File checks live in ingestion.** The Chicago and UK extractors
+  confirm each file is readable UTF-8 with a header row before copying
+  it; NYC treats an empty API result as a failure. There is no separate
+  raw-validation stage.
+- **Staging maps, validation gates.** `staging.py` applies each
+  adapter's `field_mapping` and nulls sentinel values, leaving values as
+  source-faithful text. `checks.py` then runs 8 checks per batch and
+  writes every result to `dq_run_log`. Any `fail` stops the run before
+  harmonization, so no partial data reaches curated or Postgres.
+- **Harmonization runs once, across all sources.** `curated.py` reads
+  the newest staged batch of every source, converts local time to UTC,
+  casts types and writes the partitioned Parquet. Its date formats and
+  types are set in code, not read from the YAML configs.
+- **Postgres is loaded from the curated Parquet**, by an UPSERT on the
+  natural key, so reruns update rows rather than duplicate them. The
+  Parquet layer holds only the latest batch per source; Postgres keeps
+  every batch ever loaded.
+- **The quality report** summarizes the run's `dq_run_log` rows and runs
+  even when an earlier stage failed.
 
 ---
 
@@ -160,10 +175,9 @@ schema.
 
 Traces each canonical `fact_crash` field back to its source column(s)
 across `chicago_us`, `nyc_us`, and `uk_stats19`, including the
-`source_row_raw_ref` → raw-layer file → `batch_id` → `manifest.json`
-traceability chain. Structural nulls (fields a source cannot populate)
-are shown as dashed paths, matching the gap matrix in
-`docs/data_dictionary.md`.
+`batch_id` → raw batch folder → `manifest.json` traceability chain.
+Structural nulls (fields a source cannot populate) are shown as dashed
+paths, matching the gap matrix in `docs/data_dictionary.md`.
 
 ```mermaid
 flowchart LR
@@ -192,9 +206,11 @@ flowchart LR
         NY3["latitude / longitude"]
         NY4["number_of_persons_injured"]
         NY5["number_of_pedestrians_killed<br/>+ number_of_cyclist_killed<br/>+ number_of_motorist_killed"]
+        NY15["number_of_persons_killed<br/>(aggregate, ~88% null)"]
         NY6["vehicle_type_code1..5<br/>(non-null count)"]
         NY7["contributing_factor_vehicle_1"]
-        NY8["— no severity field —"]
+        NY8["— no categorical severity —<br/>derived from counts, no 'serious'"]
+        NY14["— no police_notified field —"]
         NY9["— no crash_type field —"]
         NY10["— no weather field —"]
         NY11["— no lighting field —"]
@@ -218,13 +234,14 @@ flowchart LR
         UK12["— no crash_type field —"]
         UK13["— no primary_cause field —"]
         UK14["— no hit_and_run field —"]
+        UK15["— national dataset, no city —"]
     end
 
     subgraph CANON["fact_crash — canonical curated table"]
         direction TB
         F1["crash_id<br/>{source_id}:{source_record_id}"]
         F2["source_record_id"]
-        F3["crash_timestamp_utc"]
+        F3["crash_timestamp_utc<br/>(local → UTC in curated.py)"]
         F4["police_notified_timestamp_utc"]
         F5["latitude / longitude<br/>+ has_valid_coordinates"]
         F6["severity"]
@@ -239,13 +256,14 @@ flowchart LR
         F15["posted_speed_limit_mph"]
         F16["hit_and_run"]
         F17["city / country"]
+        F18["batch_id"]
     end
 
     subgraph LINEAGE["Row-level traceability"]
         direction TB
-        L1["fact_crash.source_row_raw_ref"]
-        L2["data/raw/{source_id}/{batch_id}/<br/>original file at row N"]
-        L3["manifest.json<br/>retrieved_at_utc · sha256 · record_count"]
+        L1["fact_crash.batch_id<br/>+ source_record_id"]
+        L2["data/raw/{source_id}/{batch_id}/<br/>original files<br/>(record found by source_record_id)"]
+        L3["manifest.json<br/>retrieved_at_utc · file list · sha256 per file"]
     end
 
     %% Chicago → canonical
@@ -272,6 +290,10 @@ flowchart LR
     NY2 --> F3
     NY3 --> F5
     NY4 --> F8
+    NY4 -->|"nyc_severity()"| F6
+    NY5 -->|"nyc_severity()"| F6
+    NY4 --> F7
+    NY15 --> F7
     NY5 --> F9
     NY6 --> F10
     NY7 --> F12
@@ -290,20 +312,22 @@ flowchart LR
     UK9 --> F15
 
     %% Structural gaps (dashed = not populated by this source)
-    NY8 -.->|"cannot populate"| F6
+    NY8 -.->|"cannot populate 'serious'"| F6
+    NY14 -.->|"cannot populate"| F4
     NY9 -.->|"cannot populate"| F11
     NY10 -.->|"cannot populate"| F13
     NY11 -.->|"cannot populate"| F14
     NY12 -.->|"cannot populate"| F15
-    NY13 -.->|"cannot populate"| F16
+    NY13 -.->|"defaults to false"| F16
     UK10 -.->|"cannot populate"| F4
     UK11 -.->|"cannot populate"| F9
     UK12 -.->|"cannot populate"| F11
     UK13 -.->|"cannot populate"| F12
-    UK14 -.->|"cannot populate"| F16
+    UK14 -.->|"defaults to false"| F16
+    UK15 -.->|"city is null"| F17
 
     %% Row-level lineage chain
-    F1 -.->|"via batch_id"| L1
+    F18 -.->|"every row carries"| L1
     L1 --> L2
     L2 --> L3
 
@@ -315,22 +339,29 @@ flowchart LR
     classDef gapStyle   fill:#ffebee,stroke:#c62828,stroke-width:1px,stroke-dasharray: 3 2
 
     class CH1,CH2,CH3,CH4,CH5,CH6,CH7,CH8,CH9,CH10,CH11,CH12,CH13,CH14 chiStyle
-    class NY1,NY2,NY3,NY4,NY5,NY6,NY7 nycStyle
-    class NY8,NY9,NY10,NY11,NY12,NY13,UK10,UK11,UK12,UK13,UK14 gapStyle
+    class NY1,NY2,NY3,NY4,NY5,NY6,NY7,NY15 nycStyle
+    class NY8,NY9,NY10,NY11,NY12,NY13,NY14,UK10,UK11,UK12,UK13,UK14,UK15 gapStyle
     class UK1,UK2,UK3,UK4,UK5,UK6,UK7,UK8,UK9 ukStyle
-    class F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12,F13,F14,F15,F16,F17 canonStyle
+    class F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12,F13,F14,F15,F16,F17,F18 canonStyle
     class L1,L2,L3 linStyle
 ```
 
 **Reading this diagram:** Solid arrows are real field mappings from an
-adapter YAML. Dashed red arrows labelled "cannot populate" are the
+adapter YAML; arrows labelled with a function name (`nyc_severity()`)
+are derived in `src/transform/derivations.py`. Dashed red arrows are the
 structural gaps from `docs/data_dictionary.md` — fields a source does not
-collect, not mapping omissions. Blue = Chicago, amber = NYC, green = UK,
-cyan = canonical `fact_crash`. The purple band at the bottom is the
-row-level lineage chain: every `fact_crash` row carries a
-`source_row_raw_ref` pointing back to the exact file in
-`data/raw/{source_id}/{batch_id}/`, whose `manifest.json` records when it
-was retrieved and its SHA-256.
+collect, not mapping omissions. NYC severity is a partial gap: it is
+derived from injury and death counts, so it can be `fatal`, `minor` or
+`none` but never `serious`. Blue = Chicago, amber = NYC, green = UK,
+cyan = canonical `fact_crash`.
+
+The purple band is the row-level lineage chain. Every `fact_crash` row
+carries the `batch_id` of the run that last wrote it, which names its
+raw folder `data/raw/{source_id}/{batch_id}/`; `source_record_id`
+locates the record in that batch's files, and the batch's
+`manifest.json` records when it was retrieved and each file's SHA-256.
+(`source_row_raw_ref` exists in the schema for a future per-row pointer
+but is not populated yet.)
 
 ---
 

@@ -24,9 +24,11 @@ flowchart LR
         NY3["latitude / longitude"]
         NY4["number_of_persons_injured"]
         NY5["number_of_pedestrians_killed<br/>+ number_of_cyclist_killed<br/>+ number_of_motorist_killed"]
+        NY15["number_of_persons_killed<br/>(aggregate, ~88% null)"]
         NY6["vehicle_type_code1..5<br/>(non-null count)"]
         NY7["contributing_factor_vehicle_1"]
-        NY8["— no severity field —"]
+        NY8["— no categorical severity —<br/>derived from counts, no 'serious'"]
+        NY14["— no police_notified field —"]
         NY9["— no crash_type field —"]
         NY10["— no weather field —"]
         NY11["— no lighting field —"]
@@ -50,13 +52,14 @@ flowchart LR
         UK12["— no crash_type field —"]
         UK13["— no primary_cause field —"]
         UK14["— no hit_and_run field —"]
+        UK15["— national dataset, no city —"]
     end
 
     subgraph CANON["fact_crash — canonical curated table"]
         direction TB
         F1["crash_id<br/>{source_id}:{source_record_id}"]
         F2["source_record_id"]
-        F3["crash_timestamp_utc"]
+        F3["crash_timestamp_utc<br/>(local → UTC in curated.py)"]
         F4["police_notified_timestamp_utc"]
         F5["latitude / longitude<br/>+ has_valid_coordinates"]
         F6["severity"]
@@ -71,13 +74,14 @@ flowchart LR
         F15["posted_speed_limit_mph"]
         F16["hit_and_run"]
         F17["city / country"]
+        F18["batch_id"]
     end
 
     subgraph LINEAGE["Row-level traceability"]
         direction TB
-        L1["fact_crash.source_row_raw_ref"]
-        L2["data/raw/{source_id}/{batch_id}/<br/>original file at row N"]
-        L3["manifest.json<br/>retrieved_at_utc · sha256 · record_count"]
+        L1["fact_crash.batch_id<br/>+ source_record_id"]
+        L2["data/raw/{source_id}/{batch_id}/<br/>original files<br/>(record found by source_record_id)"]
+        L3["manifest.json<br/>retrieved_at_utc · file list · sha256 per file"]
     end
 
     %% Chicago → canonical
@@ -104,6 +108,10 @@ flowchart LR
     NY2 --> F3
     NY3 --> F5
     NY4 --> F8
+    NY4 -->|"nyc_severity()"| F6
+    NY5 -->|"nyc_severity()"| F6
+    NY4 --> F7
+    NY15 --> F7
     NY5 --> F9
     NY6 --> F10
     NY7 --> F12
@@ -122,20 +130,22 @@ flowchart LR
     UK9 --> F15
 
     %% Structural gaps (dashed = not populated by this source)
-    NY8 -.->|"cannot populate"| F6
+    NY8 -.->|"cannot populate 'serious'"| F6
+    NY14 -.->|"cannot populate"| F4
     NY9 -.->|"cannot populate"| F11
     NY10 -.->|"cannot populate"| F13
     NY11 -.->|"cannot populate"| F14
     NY12 -.->|"cannot populate"| F15
-    NY13 -.->|"cannot populate"| F16
+    NY13 -.->|"defaults to false"| F16
     UK10 -.->|"cannot populate"| F4
     UK11 -.->|"cannot populate"| F9
     UK12 -.->|"cannot populate"| F11
     UK13 -.->|"cannot populate"| F12
-    UK14 -.->|"cannot populate"| F16
+    UK14 -.->|"defaults to false"| F16
+    UK15 -.->|"city is null"| F17
 
     %% Row-level lineage chain
-    F1 -.->|"via batch_id"| L1
+    F18 -.->|"every row carries"| L1
     L1 --> L2
     L2 --> L3
 
@@ -147,8 +157,8 @@ flowchart LR
     classDef gapStyle   fill:#ffebee,stroke:#c62828,stroke-width:1px,stroke-dasharray: 3 2
 
     class CH1,CH2,CH3,CH4,CH5,CH6,CH7,CH8,CH9,CH10,CH11,CH12,CH13,CH14 chiStyle
-    class NY1,NY2,NY3,NY4,NY5,NY6,NY7 nycStyle
-    class NY8,NY9,NY10,NY11,NY12,NY13,UK10,UK11,UK12,UK13,UK14 gapStyle
+    class NY1,NY2,NY3,NY4,NY5,NY6,NY7,NY15 nycStyle
+    class NY8,NY9,NY10,NY11,NY12,NY13,NY14,UK10,UK11,UK12,UK13,UK14,UK15 gapStyle
     class UK1,UK2,UK3,UK4,UK5,UK6,UK7,UK8,UK9 ukStyle
-    class F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12,F13,F14,F15,F16,F17 canonStyle
+    class F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12,F13,F14,F15,F16,F17,F18 canonStyle
     class L1,L2,L3 linStyle

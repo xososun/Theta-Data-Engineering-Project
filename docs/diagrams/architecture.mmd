@@ -6,59 +6,59 @@ flowchart TB
         S3["UK STATS19 Collisions<br/>(5 annual CSVs, 2021–2025)"]
     end
 
-    subgraph ING["Ingestion — per-source adapter, config-driven"]
+    subgraph ING["Ingestion — src/extract/, one extractor per source"]
         direction LR
-        A1["chicago_extractor.py<br/>byte-for-byte copy"]
-        A2["nyc_extractor.py<br/>retries + compound pagination"]
-        A3["uk_extractor.py<br/>per-year failure isolation"]
+        A1["chicago_extractor.py<br/>byte-for-byte copy<br/>file check: UTF-8, header row"]
+        A2["nyc_extractor.py<br/>retries + backoff · compound pagination<br/>90-day window ending at newest published date<br/>0 rows = failure"]
+        A3["uk_extractor.py<br/>per-year failure isolation<br/>file check: UTF-8, header row"]
     end
 
-    subgraph RAW["RAW Layer — source-faithful, no transformation"]
+    subgraph RAW["RAW Layer — source-faithful, never overwritten"]
         direction LR
-        R1["data/raw/&lt;source_id&gt;/&lt;batch_id&gt;/<br/>original files + manifest.json"]
+        R1["data/raw/&lt;source_id&gt;/&lt;batch_id&gt;/<br/>original files + manifest.json<br/>(retrieved_at_utc · sha256 per file)"]
     end
 
-    subgraph VAL1["Raw Validation"]
+    subgraph STG["STAGING Layer — src/transform/staging.py, per source"]
         direction LR
-        V1["File readability, encoding,<br/>header sanity, row counts"]
+        ST1["Apply adapter field_mapping<br/>(from · literal · map · derive_fn)<br/>→ canonical column names<br/>null sentinels: -1 and (0,0) → null"]
     end
 
-    subgraph STG["STAGING Layer — per-source cleaning"]
+    subgraph VAL["Validation — src/validation/checks.py, per batch"]
         direction LR
-        ST1["Type conversion · date parsing<br/>null sentinel translation (-1, (0,0))<br/>dedup · category standardization"]
+        V1["8 automated checks<br/>schema · nullability · uniqueness · accepted values<br/>range · date logic · referential · row count<br/>results → dq_run_log · any fail stops the run"]
     end
 
-    subgraph VAL2["Validation — 5+ automated checks"]
+    subgraph HARM["Harmonization — src/transform/curated.py, all sources at once"]
         direction LR
-        V2["Schema · Nullability · Uniqueness<br/>Accepted values · Range ·<br/>Row-count reconciliation"]
+        H1["Parse timestamps · local time → UTC<br/>cast canonical types · crash_date_key<br/>(DST-ambiguous times excluded)"]
     end
 
-    subgraph HARM["Harmonization — adapter YAML mappings"]
+    subgraph CUR["CURATED Layer — canonical schema (25 fields)"]
         direction LR
-        H1["config/adapters/*.yaml<br/>field maps · value translations<br/>→ canonical schema"]
+        C1["Partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month=<br/>rebuilt each run"]
     end
 
-    subgraph CUR["CURATED Layer — canonical schema"]
+    subgraph LOAD["Load — src/load/load_postgres.py"]
         direction LR
-        C1["config/canonical_schema.yaml<br/>fact_crash (27 canonical fields)"]
+        L1["UPSERT on (source_id, source_record_id)<br/>dim_date first, then fact_crash"]
     end
 
-    subgraph OUT["Outputs"]
+    subgraph OUT["Storage & Reporting"]
         direction LR
         O1[("PostgreSQL<br/>fact_crash · dim_source<br/>dim_date · dq_run_log")]
-        O2["Partitioned Parquet<br/>source_id/year/month"]
+        O2["quality_report.py<br/>data/quality_reports/*.md"]
     end
 
     subgraph CONS["Consumption"]
         direction LR
         K1["SQL queries<br/>(analyst)"]
         K2["EDA notebook<br/>temporal · severity"]
-        K3["Clustering notebook<br/>DBSCAN / HDBSCAN hotspots"]
+        K3["Clustering notebook<br/>DBSCAN hotspots"]
     end
 
     subgraph ORCH["Orchestration & Runtime"]
         direction LR
-        OR1["Apache Airflow<br/>DAG: extract → validate →<br/>stage → validate → harmonize →<br/>load → publish → report"]
+        OR1["Apache Airflow — DAG crash_pipeline<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → load → quality_report<br/>weekly · 2 retries · report runs ALL_DONE"]
         OR2["Docker Compose<br/>postgres · airflow-webserver<br/>airflow-scheduler · pipeline"]
         OR3["YAML configs<br/>adapters · canonical schema"]
         OR4["Git / GitHub<br/>version control"]
@@ -71,31 +71,31 @@ flowchart TB
     A1 --> R1
     A2 --> R1
     A3 --> R1
-    R1 --> V1
-    V1 --> ST1
-    ST1 --> V2
-    V2 --> H1
+    R1 --> ST1
+    ST1 --> V1
+    V1 -->|"all sources pass"| H1
     H1 --> C1
-    C1 --> O1
-    C1 --> O2
+    C1 --> L1
+    L1 --> O1
+    V1 -->|"check results"| O1
+    O1 --> O2
     O1 --> K1
     O1 --> K2
-    O1 --> K3
-    O2 --> K2
-    O2 --> K3
+    C1 --> K2
+    C1 --> K3
 
     %% Orchestration / runtime (dashed = wraps, not data flow)
     OR1 -. orchestrates .-> ING
-    OR1 -. orchestrates .-> VAL1
     OR1 -. orchestrates .-> STG
-    OR1 -. orchestrates .-> VAL2
+    OR1 -. orchestrates .-> VAL
     OR1 -. orchestrates .-> HARM
-    OR1 -. orchestrates .-> OUT
+    OR1 -. orchestrates .-> LOAD
+    OR1 -. orchestrates .-> O2
     OR2 -. hosts .-> OR1
     OR2 -. hosts .-> O1
     OR3 -. configures .-> ING
-    OR3 -. configures .-> HARM
-    OR3 -. configures .-> C1
+    OR3 -. configures .-> STG
+    OR3 -. configures .-> VAL
     OR4 -. versions .-> OR1
     OR4 -. versions .-> OR3
 
@@ -113,9 +113,9 @@ flowchart TB
     class S1,S2,S3 srcStyle
     class A1,A2,A3 ingStyle
     class R1 rawStyle
-    class V1,V2 valStyle
+    class V1 valStyle
     class ST1 stgStyle
     class H1,C1 curStyle
-    class O1,O2 outStyle
+    class L1,O1,O2 outStyle
     class K1,K2,K3 consStyle
     class OR1,OR2,OR3,OR4 orchStyle
