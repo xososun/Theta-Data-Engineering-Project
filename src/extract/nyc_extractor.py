@@ -175,7 +175,7 @@ def run(since: str, until: str, config_path: str, raw_root: str, max_rows: int |
         time.sleep(0.2)  # be polite to the public endpoint
 
     if total_rows == 0 and not hit_permanent_error:
-        # Zero rows for a 5-year window on an active dataset is suspicious
+        # Zero rows for a 90-day window on an active dataset is suspicious
         # enough to treat as a failure, not a quiet empty success - most
         # likely the date filter or endpoint shape changed.
         raise RuntimeError(

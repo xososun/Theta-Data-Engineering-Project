@@ -69,7 +69,7 @@ defense, so skim the other two sections even if they aren't yours.
 - [x] Diagrams index — `docs/diagrams.md`, with all three diagrams embedded and rendered via Mermaid — Member C (2026-10-06)
 
 ## Not Yet Assigned
-- [ ] README updates as each workstream lands
+- [x] README updates as each workstream lands
 - [ ] Final technical report
 - [ ] Presentation slides
 - [ ] Individual Q&A prep (everyone, not delegable)
