@@ -120,6 +120,9 @@ Compose, Git/GitHub.
 - `src/profiling/profile_crashes.py`: reusable profiling script for the
   Chicago source (schema drift, missingness, date formats, coordinate
   sentinels and bounding box, district coverage, date logic).
+- Full-scale Chicago profiling reports are committed in
+  `outputs/profiling/`: `chicago_full_profile.json` (2026-09-30, adds yearly
+  and district coverage) and `chicago_profiling_report.json` (2026-09-29).
 
 ### Staging transformation (`src/transform/`)
 
@@ -182,14 +185,27 @@ pass, 2 warn, 0 fail.
 
 ### CSV / JSON / Parquet comparison (`src/transform/format_compare.py`)
 
-Writes the same curated slice in all three formats, measures file size
-and read/write time, and emits a Markdown report to
-`data/curated/format_benchmark/format_benchmark.md`. Result: Parquet is
-smallest (2.48 MB) and fastest to write and read; CSV is 2.0× larger and
-JSON 3.8× larger. CSV is still used where it fits (source exports), JSON
-where the source speaks it (the NYC API), and Parquet for everything the
-pipeline produces, because it preserves column types and supports
-partition pruning.
+Writes the same curated slice in all three formats from one in-memory
+DataFrame, reads each back, and records file size and write/read time.
+It is a one-off benchmark run by hand (see "Running stages manually"), not
+a DAG task. The latest report is committed at
+[`outputs/format_benchmark.md`](outputs/format_benchmark.md).
+
+Result on 8,924 rows (Chicago, March 2024):
+
+| Format | Size | vs Parquet | Write (s) | Read (s) |
+|---|---:|---:|---:|---:|
+| CSV | 4.98 MB | 2.03× | 0.399 | 0.142 |
+| JSON | 9.30 MB | 3.79× | 0.465 | 0.287 |
+| Parquet | 2.45 MB | 1.00× | 0.067 | 0.012 |
+
+Parquet is the smallest and the fastest to both write and read (about 6×
+faster to write and 12× faster to read than CSV here). It also keeps
+column types and supports partition pruning and column selection, which
+CSV and JSON cannot. Each format is therefore used where it fits: CSV as
+the interchange format of the Chicago and UK source exports, JSON as the
+NYC API's response format in the raw layer, and Parquet for everything
+the pipeline produces (staging and curated).
 
 ### Orchestration (`dags/crash_pipeline.py`)
 
@@ -280,7 +296,7 @@ pipeline lives entirely in `src/` and `dags/`.
 │   └── adapters/               # one YAML per source: chicago, nyc, uk
 ├── dags/
 │   └── crash_pipeline.py       # the Airflow DAG
-├── data/                       # incoming/, raw/, staging/, curated/ (contents gitignored)
+├── data/                       # incoming/, raw/, staging/, curated/, quality_reports/ (contents gitignored)
 ├── docs/
 │   ├── project_proposal.md
 │   ├── data_dictionary.md
@@ -288,9 +304,14 @@ pipeline lives entirely in `src/` and `dags/`.
 │   ├── diagrams.md
 │   └── diagrams/               # architecture.mmd, lineage.mmd, erd.mmd
 ├── notebooks/                  # eda.ipynb, clustering.ipynb (bonus analytics)
+├── outputs/                    # committed evidence from real runs (data/ is gitignored)
+│   ├── format_benchmark.md     # CSV vs JSON vs Parquet results
+│   ├── quality_report_*.md     # data-quality report from a full DAG run
+│   └── profiling/              # full-scale Chicago profiling reports (JSON)
 ├── sql/
 │   ├── 00_airflow_metadata.sql # creates Airflow's metadata DB on first start
-│   └── schema.sql              # project DDL, auto-applied on first start
+│   ├── schema.sql              # project DDL, auto-applied on first start
+│   └── queries.sql             # representative analytical and verification queries
 ├── src/
 │   ├── extract/                # chicago, nyc, uk extractors
 │   ├── transform/              # staging, derivations, curated, format_compare
@@ -304,6 +325,11 @@ pipeline lives entirely in `src/` and `dags/`.
 `src/profiling/` is an addition to the course's suggested layout. It
 keeps one-off source-profiling scripts separate from the validation
 checks that run inside the DAG.
+
+`outputs/` holds copies of generated reports so evaluators can see real
+results without running the pipeline. Everything under `data/` is
+regenerable and gitignored; the files in `outputs/` are the snapshots
+the README's figures come from.
 
 ## Setup
 
@@ -409,7 +435,7 @@ docker compose run --rm pipeline python src/transform/curated.py --read-source c
 # Data-quality report (default: checks from the last 24 hours)
 docker compose run --rm pipeline python src/validation/quality_report.py
 
-# Format benchmark
+# Format benchmark (then, on the host: cp data/curated/format_benchmark/format_benchmark.md outputs/)
 docker compose run --rm pipeline python src/transform/format_compare.py --source chicago_us --year 2024 --month 3
 
 # Inspect a raw batch's manifest
@@ -425,21 +451,37 @@ for the full option list.
 
 ### Representative queries
 
-```sql
--- Crashes and fatal crashes per source per year
-SELECT f.source_id, d.year,
-       COUNT(*) AS crashes,
-       COUNT(*) FILTER (WHERE f.severity = 'fatal') AS fatal_crashes
-FROM fact_crash f
-JOIN dim_date d ON d.date_key = f.crash_date_key
-GROUP BY f.source_id, d.year
-ORDER BY f.source_id, d.year;
+[`sql/queries.sql`](sql/queries.sql) has 13 commented queries, each noting
+the structural gaps it respects:
 
--- Latest data-quality results
-SELECT source_id, check_name, status, rows_failed, details
-FROM dq_run_log
-ORDER BY run_timestamp DESC
-LIMIT 24;
+- **Verification:** rows per source and batch; duplicate natural keys
+  (expected: none, the rerun-safety check); latest result per
+  data-quality check.
+- **Analysis:** crashes per year; hour and weekday profiles in each
+  city's local time; severity mix; fatal share among injury crashes only
+  (the like-for-like comparison); Chicago's leading causes of serious
+  crashes; a monthly trend with a rolling average; a spatial
+  bounding-box query.
+- **Engineering:** an `EXPLAIN` showing a one-source, one-month query
+  using `idx_fact_crash_source_date` instead of a full scan; tracing one
+  record back to its raw batch folder and that batch's quality checks.
+
+Run the whole file:
+
+```bash
+docker compose exec -T postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB> < sql/queries.sql
+```
+
+For example, the like-for-like fatal rate:
+
+```sql
+SELECT source_id,
+       COUNT(*) AS injury_crashes,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE severity = 'fatal') / COUNT(*), 3) AS pct_fatal
+FROM fact_crash
+WHERE severity IN ('fatal', 'serious', 'minor')
+GROUP BY source_id
+ORDER BY pct_fatal DESC;
 ```
 
 ## Rerun Safety
@@ -461,10 +503,11 @@ never duplicates data:
 | Raw batches + manifests | `data/raw/<source_id>/<batch_id>/` |
 | Staged batches | `data/staging/<source_id>/<batch_id>/fact_crash.parquet` |
 | Curated partitioned dataset | `data/curated/fact_crash/source_id=*/year=*/month=*/` |
-| Format benchmark report | `data/curated/format_benchmark/format_benchmark.md` |
+| Format benchmark report | `data/curated/format_benchmark/format_benchmark.md` (committed copy: `outputs/format_benchmark.md`) |
 | Curated tables | PostgreSQL: `fact_crash`, `dim_source`, `dim_date` |
 | Validation results | PostgreSQL: `dq_run_log` |
-| Data-quality reports | `data/quality_reports/quality_report_<timestamp>.md` |
+| Data-quality reports | `data/quality_reports/quality_report_<timestamp>.md` (committed copy: `outputs/quality_report_*.md`) |
+| Source profiling reports | `outputs/profiling/*.json` |
 
 ## Known Limitations and Assumptions
 
