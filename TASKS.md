@@ -11,7 +11,7 @@ defense, so skim the other two sections even if they aren't yours.
 
 ---
 
-## Member A — Ingestion & Environment
+## Member A (Santos) — Ingestion & Environment
 *No dependencies — can start immediately.*
 
 - [x] Chicago bulk-file extractor (reads `config/adapters/chicago.yaml`, does not hardcode mapping logic) — `src/extract/chicago_extractor.py`
@@ -22,7 +22,7 @@ defense, so skim the other two sections even if they aren't yours.
 - [x] Dockerfile + `docker-compose.yml` (Postgres, Airflow, pipeline image) — **fully tested end-to-end** (Postgres init scripts, Airflow webserver/scheduler healthy, all 3 extractors run successfully against real data via the `pipeline` service). One real bug found & fixed: `pipeline`'s entrypoint — see README "What's actually done" for the full explanation.
 - [x] `.env.example` with all config externalized (DB host/name/port, paths, API settings) — no real secrets committed
 
-## Member B — Transformation, Validation & Database
+## Member B (Hermoso) — Transformation, Validation & Database
 *Needs Member A's raw layer (even a stub/sample) to transform against.*
 
 - [x] Staging transformation code that executes each adapter YAML's `field_mapping` (shared logic across sources, not copy-pasted per source) — (MB, 2026-10-05)
@@ -43,7 +43,7 @@ defense, so skim the other two sections even if they aren't yours.
 - [x] CSV / JSON / Parquet handling + size and performance comparison — (MB, 2026-10-05)
 - [x] Postgres load of 1,611,920 rows with verified idempotency — (MB, 2026-10-05)
 
-## Member C — Orchestration, Diagrams & Analytics
+## Member C (Leyte) — Orchestration, Diagrams & Analytics
 *Can start diagrams/DAG skeleton immediately from existing schema/adapters; needs real data for the notebook.*
 
 - [x] Airflow DAG: `extract → raw_validate → stage → validate → harmonize → load_postgres → publish_parquet → quality_report` — `dags/crash_pipeline.py` (2026-10-06)

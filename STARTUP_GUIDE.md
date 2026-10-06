@@ -9,8 +9,6 @@ For Members B and C picking up from Member A's work (ingestion + environment). R
 - Postgres starts with `sql/schema.sql` and `sql/00_airflow_metadata.sql` applied automatically.
 - Airflow webserver and scheduler run healthy.
 
-**Not built yet:** staging/curated transformation, DQ checks, DAGs, Parquet partitioning, data contract, diagrams, tests beyond NYC, notebooks. See `TASKS.md` for who owns what.
-
 ## 2. Prerequisites
 
 - Docker Desktop (on Windows: with the WSL2 backend)
