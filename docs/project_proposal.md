@@ -3,6 +3,8 @@
 **Course:** DSS150P Data Engineering
 **Status:** Draft v1. Items marked ⚠ need verification or a team decision.
 
+***Superseded where it differs from the implementation; see README***
+
 ---
 
 ## 1. Problem Statement

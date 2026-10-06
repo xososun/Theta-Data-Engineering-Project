@@ -41,19 +41,19 @@ defense, so skim the other two sections even if they aren't yours.
 - [x] Partitioning: write curated output to Parquet, partitioned by `source_id/year/month` — (MB, 2026-10-05)
 - [x] Demonstrate reading a single partition without a full scan — (MB, 2026-10-05)
 - [x] CSV / JSON / Parquet handling + size and performance comparison — (MB, 2026-10-05)
-- [x] Postgres load of 1,611,920 rows with verified idempotency — (MB, 2026-10-05)
+- [x] Postgres load of 1,630,664 rows with verified idempotency — (MB, 2026-10-06)
 
 ## Member C (Leyte) — Orchestration, Diagrams & Analytics
 *Can start diagrams/DAG skeleton immediately from existing schema/adapters; needs real data for the notebook.*
 
-- [x] Airflow DAG: `extract → raw_validate → stage → validate → harmonize → load_postgres → publish_parquet → quality_report` — `dags/crash_pipeline.py` (2026-10-06)
+- [x] Airflow DAG: `extract → stage → validate → harmonize → load → quality_report` — `dags/crash_pipeline.py` (2026-10-06)
 - [x] Task dependencies, scheduling, retries, failure handling — in `dags/crash_pipeline.py`: per-source task groups via dynamic task mapping; weekly schedule; 2 retries with 2-min delay; `quality_report` uses `TriggerRule.ALL_DONE` so partial runs still report (2026-10-06)
 - [x] Architecture diagram (sources → ingestion → raw → validation → staging → curated → Postgres → orchestration → consumption) — `docs/diagrams/architecture.mmd`, embedded in `docs/diagrams.md` §1 (2026-10-06)
-- [x] Data flow / lineage diagram — `docs/diagrams/lineage.mmd`, embedded in `docs/diagrams.md` §2; field-level provenance plus the `source_row_raw_ref` → raw-file → manifest traceability chain (2026-10-06)
+- [x] Data flow / lineage diagram — `docs/diagrams/lineage.mmd`, embedded in `docs/diagrams.md` §2 (2026-10-06)
 - [x] ERD from `sql/schema.sql` — `docs/diagrams/erd.mmd`, embedded in `docs/diagrams.md` §3 (2026-10-06)
 - [x] Data contract document (distinct from `docs/data_dictionary.md` — expected fields/types/nullability/constraints per producer/consumer) — `docs/data_contract.md` (2026-10-06)
-- [ ] EDA notebook (temporal/severity patterns across cities, using the gap table in `data_dictionary.md` to avoid misreading structural nulls as findings)
-- [ ] Clustering notebook (hotspot detection, run per city with identical code)
+- [x] EDA notebook (temporal/severity patterns across cities, using the gap table in `data_dictionary.md` to avoid misreading structural nulls as findings)
+- [x] Clustering notebook (hotspot detection, run per city with identical code)
 
 ---
 

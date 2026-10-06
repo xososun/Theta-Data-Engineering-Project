@@ -3,9 +3,10 @@
 nyc_extractor.py
 
 Production ingestion for the NYC Motor Vehicle Collisions - Crashes
-Socrata API, scoped to the last 5 years (matching the UK and Chicago
-windowing decisions). This replaces the earlier pull_nyc_sample.py, which
-was a profiling tool, not a production extractor: it lacked retries,
+Socrata API, scoped to the 90 days ending at the newest published date
+(matching the UK and Chicago windowing decisions). This replaces
+the earlier pull_nyc_sample.py, which was a profiling tool,
+not a production extractor: it lacked retries,
 raw-layer writing, and ingestion metadata.
 
 Key differences from the sampling script:
