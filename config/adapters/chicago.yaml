@@ -1,12 +1,19 @@
 # adapters/chicago.yaml
 #
 # Source adapter for the City of Chicago "Traffic Crashes - Crashes" dataset.
-# This is the pattern every future city adapter follows: adding NYC or the
-# UK means writing a new file like this one, not touching shared code.
+# This is the pattern every city adapter follows: adding a new source means
+# writing a new file like this one (plus any named derive functions in
+# src/transform/derivations.py), not touching shared pipeline code.
 #
 # Values below (date parsing, bounding box, mappings) are set from
 # profiling the real full export (Traffic_Crashes_-_Crashes_20260923.csv,
 # 1,096,581 rows), not from the small samples used earlier.
+#
+# Mapping primitives understood by src/transform/staging.py:
+#   from:       copy a source column
+#   literal:    constant value
+#   map:        translate source values (with `default:` fallback)
+#   derive_fn:  call a named function in src/transform/derivations.py
 
 source_id: chicago_us
 provider: City of Chicago Data Portal (Socrata)
@@ -21,9 +28,11 @@ source_local_timezone: America/Chicago
 # CRASH_DATE / DATE_POLICE_NOTIFIED are uniform "MM/DD/YYYY hh:mm:ss AM/PM"
 # at full scale (confirmed: 1,096,581 / 1,096,581 rows). The mixed-format
 # behavior seen in the small sample CSV did not reproduce in the real
-# export, so a single strptime format is sufficient here — kept as
-# format="mixed" anyway for defense-in-depth against a future export
-# quirk, at negligible cost.
+# export. Timestamp parsing and the local-time -> UTC conversion happen in
+# src/transform/curated.py (_parse_timestamps), which uses the explicit
+# format "%m/%d/%Y %I:%M:%S %p" and falls back to inferred parsing only if
+# every row fails. Keep curated.py's DATE_FORMATS / LOCAL_TZ in sync with
+# this file if either changes.
 date_format: "mixed"
 
 bounding_box:
@@ -31,34 +40,35 @@ bounding_box:
   longitude: [-87.95, -87.50]
 
 field_mapping:
+  # source_id and source_local_timezone are required canonical fields, so
+  # they are also emitted as literals here (the top-level keys above are
+  # metadata; staging.py only populates columns listed under field_mapping).
+  source_id:
+    literal: chicago_us
+  source_local_timezone:
+    literal: America/Chicago
   crash_id:
-    derive: "'chicago_us:' + CRASH_RECORD_ID"
+    derive_fn: chicago_crash_id          # "chicago_us:" + CRASH_RECORD_ID
   source_record_id:
     from: CRASH_RECORD_ID
   crash_timestamp_utc:
-    from: CRASH_DATE
-    parse: date_format
-    convert_timezone: source_local_timezone
+    from: CRASH_DATE                     # local time string; converted to UTC in curated.py
   police_notified_timestamp_utc:
-    from: DATE_POLICE_NOTIFIED
-    parse: date_format
-    convert_timezone: source_local_timezone
+    from: DATE_POLICE_NOTIFIED           # local time string; converted to UTC in curated.py
   city:
     literal: Chicago
   country:
     literal: US
   latitude:
     from: LATITUDE
-    reject_sentinel_zero_pair_with: LONGITUDE
+    # (0,0) sentinel pairs are nulled after mapping by
+    # staging._null_sentinel_coordinates (74 rows at full scale).
   longitude:
     from: LONGITUDE
-    reject_sentinel_zero_pair_with: LATITUDE
   has_valid_coordinates:
-    derive: >
-      LATITUDE is not null and LONGITUDE is not null
-      and not (LATITUDE == 0 and LONGITUDE == 0)
-      and LATITUDE between bounding_box.latitude
-      and LONGITUDE between bounding_box.longitude
+    # chicago_has_valid_coordinates: both present, not the (0,0) sentinel,
+    # and inside bounding_box above.
+    derive_fn: chicago_has_valid_coordinates
   severity:
     from: MOST_SEVERE_INJURY
     map:
@@ -95,9 +105,8 @@ field_mapping:
     default: false
 
 # Columns present in the source but not mapped to canonical fields.
-# Kept in the Chicago-specific staging table for lineage and in case a
-# later analysis needs them; never promoted to the cross-city curated
-# table without an explicit schema change.
+# Kept for lineage and in case a later analysis needs them; never promoted
+# to the cross-city curated table without an explicit schema change.
 unmapped_columns_kept_in_staging:
   - CRASH_DATE_EST_I
   - TRAFFIC_CONTROL_DEVICE
@@ -109,9 +118,9 @@ unmapped_columns_kept_in_staging:
   - ROAD_DEFECT
   - REPORT_TYPE
   - CRASH_TYPE            # note: source's own CRASH_TYPE is a 2-value
-                           # injury/no-injury flag, distinct from our
-                           # canonical `crash_type`, which is sourced
-                           # from FIRST_CRASH_TYPE instead. Do not confuse.
+                          # injury/no-injury flag, distinct from our
+                          # canonical `crash_type`, which is sourced
+                          # from FIRST_CRASH_TYPE instead. Do not confuse.
   - INTERSECTION_RELATED_I
   - NOT_RIGHT_OF_WAY_I    # >=95% null at full scale
   - DAMAGE
@@ -135,14 +144,14 @@ unmapped_columns_kept_in_staging:
   - CRASH_HOUR
   - CRASH_DAY_OF_WEEK
   - IDOT_CONTROL_NO
-  - LOCATION               # redundant WKT point; LATITUDE/LONGITUDE used instead
+  - LOCATION              # redundant WKT point; LATITUDE/LONGITUDE used instead
 
 # Known source-specific data-quality notes carried over from full-scale
 # profiling, for the validation layer and the report:
 known_issues:
   - "1 row (of 1,096,581) has police_notified_timestamp_utc earlier than
-     crash_timestamp_utc by ~4,077 days. Quarantine, do not silently
-     correct or drop."
+     crash_timestamp_utc by ~4,077 days. Tolerated by the date_logic check
+     as a documented anomaly; not silently corrected or dropped."
   - "74 rows have LATITUDE=0 AND LONGITUDE=0 (sentinel bad-geocode value).
      Treated as missing coordinates, not (0,0) in the Gulf of Guinea."
   - "5 rows missing BEAT_OF_OCCURRENCE; harmless for canonical fields
@@ -154,5 +163,4 @@ known_issues:
      from 2018-01-01 onward for citywide comparability; treat 2013-2017
      as partial-coverage ramp-up, not a data error."
   - "POSTED_SPEED_LIMIT full-scale range is 0-60, including some
-     implausible low values. Flagged, not rejected, by the canonical
-     schema's flag_if_outside rule."
+     implausible low values. Flagged, not rejected, by the range check."
