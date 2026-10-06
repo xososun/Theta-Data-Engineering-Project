@@ -82,6 +82,30 @@ def fetch_page(base_url: str, limit: int, offset: int, since: str, until: str) -
         raise TransientAPIError(f"NYC API returned invalid JSON (likely a transient server issue): {e}") from e
 
 
+def latest_crash_date(base_url: str) -> str:
+    """
+    Return the newest crash_date the API currently publishes, as YYYY-MM-DD.
+
+    NYC publishes collisions with a lag, so "today" is usually ahead of
+    the newest available record. Scheduled runs anchor their trailing
+    window on this date instead of today, otherwise the window can fall
+    entirely in the not-yet-published period and return 0 rows.
+    """
+    params = {"$select": "max(crash_date) AS max_date"}
+    url = f"{base_url}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "data-eng-project-nyc-extractor/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise PermanentAPIError(f"HTTP {e.code} asking NYC API for its latest date: {e.reason}") from e
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        raise TransientAPIError(f"Connection error reaching NYC API: {e}") from e
+    if not rows or not rows[0].get("max_date"):
+        raise PermanentAPIError(f"NYC API returned no max(crash_date): {rows!r}")
+    return rows[0]["max_date"][:10]
+
+
 def fetch_page_with_retry(base_url: str, limit: int, offset: int, since: str, until: str) -> list:
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -157,7 +181,7 @@ def run(since: str, until: str, config_path: str, raw_root: str, max_rows: int |
             f"0 rows returned for the requested window ({since} to {until}). "
             f"This almost certainly indicates a problem (wrong date format, "
             f"changed API schema, or an expired endpoint), not a real "
-            f"absence of NYC crashes over 5 years."
+            f"absence of NYC crashes in that window."
         )
 
     entries = write_raw_json_pages(

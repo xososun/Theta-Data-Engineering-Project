@@ -69,7 +69,8 @@ INCOMING_ROOT = "/opt/airflow/data/incoming"
 CONFIG_DIR = "/opt/airflow/config/adapters"
 
 # NYC incremental runs re-pull a trailing window to pick up late
-# amendments (proposal section 9). Adjust here, not in the extractor.
+# amendments (proposal section 9). The window ends at the newest date the
+# API has published (it lags behind today). Adjust here, not in the extractor.
 NYC_TRAILING_WINDOW_DAYS = 90
 
 UK_YEARS = [2021, 2022, 2023, 2024, 2025]
@@ -125,11 +126,18 @@ with DAG(
                 raw_root=RAW_ROOT,
             )
         elif source_id == "nyc_us":
-            from extract.nyc_extractor import run
-            today = datetime.utcnow().date()
+            from extract.nyc_extractor import latest_crash_date, run
+            from utils.config import load_adapter_config
+            # NYC publishes with a lag, so anchor the window on the newest
+            # date the API actually has, not on today.
+            api = load_adapter_config(config_path)["api_endpoint"]
+            until = datetime.strptime(latest_crash_date(api), "%Y-%m-%d").date()
+            since = until - timedelta(days=NYC_TRAILING_WINDOW_DAYS)
+            log.info("[extract] nyc_us latest published date %s; window %s to %s",
+                     until, since, until)
             result = run(
-                since=(today - timedelta(days=NYC_TRAILING_WINDOW_DAYS)).isoformat(),
-                until=today.isoformat(),
+                since=since.isoformat(),
+                until=until.isoformat(),
                 config_path=config_path,
                 raw_root=RAW_ROOT,
                 max_rows=None,
