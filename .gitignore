@@ -20,6 +20,7 @@ airflow-webserver.pid
 data/raw/*
 data/staging/*
 data/curated/*
+data/quality_reports/*
 !data/raw/.gitkeep
 !data/staging/.gitkeep
 !data/curated/.gitkeep
