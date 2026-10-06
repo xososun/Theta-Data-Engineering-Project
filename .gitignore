@@ -24,6 +24,7 @@ data/quality_reports/*
 !data/raw/.gitkeep
 !data/staging/.gitkeep
 !data/curated/.gitkeep
+!data/quality_reports/.gitkeep
 
 # data/incoming/ is a LOCAL drop zone for downloaded source files before
 # ingestion (e.g. the Chicago bulk CSV, UK annual files) - never commit
