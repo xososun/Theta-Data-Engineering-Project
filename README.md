@@ -30,19 +30,24 @@ This project builds that integration once, as a pipeline that:
 
 ## Team and Roles
 
-| Member | Workstream |
-|---|---|
-| Member A | Ingestion (all three extractors), source profiling, canonical schema, adapters, PostgreSQL DDL, Docker environment |
-| Member B | Staging transformation, data-quality checks, curated harmonization and partitioning, PostgreSQL load, format benchmark, unit tests |
-| Member C | Airflow DAG, architecture / lineage / ERD diagrams, data contract, EDA and clustering notebooks |
+| Member  | Workstream |
+|---------|---|
+| Santos  | Ingestion (all three extractors), source profiling, canonical schema, adapters, PostgreSQL DDL, Docker environment |
+| Hermoso | Staging transformation, data-quality checks, curated harmonization and partitioning, PostgreSQL load, format benchmark, unit tests |
+| Leyte   | Airflow DAG, architecture / lineage / ERD diagrams, data contract, EDA and clustering notebooks |
 
 ## Data Sources
 
-| Source | Provider | Format / retrieval | Scope | Rows |
-|---|---|---|---|---|
-| `chicago_us` | City of Chicago Data Portal (Socrata) | Bulk CSV export | Full export as of 2026-09-23 | 1,096,581 |
-| `nyc_us` | NYC Open Data (Socrata) | JSON via REST API, paginated | Trailing window (90 days per DAG run) | Varies per window |
-| `uk_stats19` | UK Department for Transport | Annual CSV files | 2021–2025, Collisions file only | 513,801 |
+| Source | Provider | Format / retrieval | Scope | Raw rows | In `fact_crash` |
+|---|---|---|---|---:|---:|
+| `chicago_us` | City of Chicago Data Portal (Socrata) | Bulk CSV export | Full export as of 2026-09-23 | 1,096,581 | 1,096,395 |
+| `nyc_us` | NYC Open Data (Socrata) | JSON via REST API, paginated | 90 days ending at the newest published date | Varies per run | 20,537 |
+| `uk_stats19` | UK Department for Transport | Annual CSV files | 2021–2025, Collisions file only | 513,801 | 513,732 |
+| **Total** | | | | | **1,630,664** |
+
+The gap between raw and loaded rows is the daylight-saving exclusion
+described under Known Limitations. NYC publishes with a lag of several
+months, so its window ends at the newest date the API has, not today.
 
 Provenance, licence, and known issues for each source are recorded in its
 adapter (`config/adapters/*.yaml`) and in `docs/data_dictionary.md`. The
@@ -73,8 +78,8 @@ Full diagrams (Mermaid source in `docs/diagrams/`, rendered together in
   orchestration / runtime / configuration / versioning layers.
 - **Data flow / lineage** (`lineage.mmd`): each canonical `fact_crash`
   field traced back to its source column(s) in all three sources,
-  including structural gaps as dashed edges and the `source_row_raw_ref`
-  → raw file → `manifest.json` traceability chain.
+  including structural gaps as dashed edges and the `batch_id` → raw
+  batch folder → `manifest.json` traceability chain.
 - **ERD** (`erd.mmd`): derived from `sql/schema.sql`: `dim_source`,
   `dim_date`, `fact_crash`, `dq_run_log`, with foreign keys, the
   natural-key UNIQUE constraint, and CHECK constraints.
@@ -161,9 +166,9 @@ pass, 2 warn, 0 fail.
   analysis is time-windowed (trends, seasonality) and monthly files stay
   a manageable size.
 - `read_partition(source_id, year, month)` uses `pyarrow.dataset` with a
-  filter, so only the matching partition is read. Verified: 1,611,920
-  rows across 208 partition files; `read_partition("chicago_us", 2024, 3)`
-  returns 8,924 rows without scanning the full dataset.
+  filter, so only the matching partition is read. For example,
+  `read_partition("chicago_us", 2024, 3)` returns 8,924 rows without
+  scanning the full dataset.
 
 ### PostgreSQL storage (`sql/schema.sql`, `src/load/load_postgres.py`)
 
@@ -172,8 +177,8 @@ pass, 2 warn, 0 fail.
   non-negative counts.
 - `load_postgres.py` populates `dim_date` (`ON CONFLICT DO NOTHING`) and
   UPSERTs `fact_crash` on `(source_id, source_record_id)` with
-  `psycopg2.extras.execute_values`. Verified: 1,611,920 rows loaded;
-  rerunning leaves row counts unchanged.
+  `psycopg2.extras.execute_values`. Verified: 1,630,664 rows loaded across 211 partitions,
+  and a second full DAG run left every per-source count unchanged.
 
 ### CSV / JSON / Parquet comparison (`src/transform/format_compare.py`)
 
@@ -478,9 +483,25 @@ never duplicates data:
   history.
 - **Out of scope for v1:** `fact_person`, `fact_vehicle`, and
   `dim_location`, which were mentioned in the proposal draft.
+- **Daylight-saving exclusion.** Crashes timestamped in a DST transition
+  hour cannot be converted to UTC unambiguously (in autumn 1:00–1:59 am
+  happens twice; in spring 2:00–2:59 am does not exist), so harmonization
+  excludes them: 186 Chicago and 69 UK rows in the current load. The
+  harmonize task log reports the count each run.
+- **Curated Parquet holds the latest batch only.** It is rebuilt each run,
+  while `fact_crash` accumulates. For NYC, Parquet has the newest 90-day
+  window and Postgres has every window ever loaded.
+- **No row-level quarantine.** A failing data-quality check blocks the
+  whole run rather than removing individual rows; rows flagged `warn`
+  are loaded.
+- **`source_row_raw_ref` is not populated.** Rows are traced to their raw
+  batch through `batch_id` instead.
 - One Postgres container hosts both the project database and Airflow's
   metadata database (separate databases), a deliberate simplification
   for a course-scale project.
+- `crash_date_key` and `dim_date` use the UTC date, so evening crashes in 
+  Chicago and NYC fall on the next day. Local-time analysis converts from 
+  `crash_timestamp_utc`.
 
 ## Troubleshooting
 
@@ -510,4 +531,7 @@ never duplicates data:
   changes only.
 - Make harmonization incremental (rewrite only the affected partitions)
   rather than rebuilding the whole curated layer.
+- Resolve DST-ambiguous timestamps (assume the first occurrence, shift
+  nonexistent times forward) instead of excluding them.
+- Populate `source_row_raw_ref` so each row points to its exact raw line.
 - Implement `fact_person` and `fact_vehicle`.
