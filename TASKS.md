@@ -71,5 +71,5 @@ defense, so skim the other two sections even if they aren't yours.
 ## Not Yet Assigned
 - [x] README updates as each workstream lands
 - [ ] Final technical report
-- [ ] Presentation slides
+- [x] Presentation slides
 - [ ] Individual Q&A prep (everyone, not delegable)
