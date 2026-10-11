@@ -28,6 +28,21 @@ date_format: "%d/%m/%Y"
 time_field: time          # separate "HH:MM" column, 24-hour, zero-padded
 
 # Confirmed across the full 5-year file (2021-2025), not just one year.
+# How new data reaches the pipeline. UK is a LOCAL FILE source: the DfT
+# publishes one file per year, usually once a year, plus occasional
+# revisions. A scheduled run re-reads the five annual files in
+# data/incoming/; if all are byte-identical to the last raw batch, no new
+# copy is written and source_freshness reports UNCHANGED. Replacing a
+# revised year, or adding a year to UK_YEARS in the DAG, creates a new batch.
+refresh:
+  method: local_file
+  incoming_pattern: "dft-road-casualty-statistics-collision-{year}.csv"
+  max_unchanged_days: 400     # annual publication cycle
+  how_to_refresh: >
+    Download the annual collision CSVs from dataset_url into data/incoming/
+    with their published names. To add a new year, also add it to
+    UK_YEARS in dags/crash_pipeline.py.
+
 bounding_box:
   latitude: [49.85, 60.55]
   longitude: [-7.60, 1.80]
@@ -78,12 +93,13 @@ field_mapping:
     literal: null
   city:
     # This is a national dataset covering England, Scotland, and Wales,
-    # not one city. `city` is left null rather than forced into a
-    # single-city model; local_authority_district (kept in staging) is
-    # the closest available granularity if district-level analysis is
-    # wanted later, but it is NOT promoted to canonical `city` since it
-    # is a different semantic level than "Chicago" or "New York City".
-    literal: null
+    # not one city. To give cross-source analysis a city-level geography,
+    # collisions handled by the Metropolitan Police (police_force 1) or the
+    # City of London Police (48) are labelled "London": together those two
+    # forces cover exactly Greater London (32 boroughs + the City), per the
+    # DfT/TfL STATS19 guidance. All other UK collisions keep city = null,
+    # since no other force area corresponds to a single city.
+    derive_fn: uk_city
   country:
     literal: GB
   latitude:
@@ -130,8 +146,8 @@ field_mapping:
   crash_type:
     # STATS19 does not classify collisions by physical type (rear-end,
     # angle, sideswipe) the way Chicago's FIRST_CRASH_TYPE does. Closest
-    # available proxy is junction_detail / road_type, kept in staging but
-    # not promoted, since it describes the location's geometry rather
+    # available proxy is junction_detail / road_type, available in the raw
+    # files but not promoted, since it describes the location's geometry rather
     # than how the vehicles collided - not a like-for-like substitute.
     literal: null
   primary_cause:
@@ -156,6 +172,11 @@ field_mapping:
     # every UK row, same documented-gap treatment as NYC's hit_and_run.
     literal: false
 
+# Columns present in the source but not mapped to canonical fields.
+# Despite the key name, staging.py writes only canonical fields: these
+# columns are NOT in the staging Parquet. They remain available in the raw
+# layer (data/raw/<source_id>/<batch_id>/), which keeps every batch, and
+# are never promoted to the curated table without a schema change.
 unmapped_columns_kept_in_staging:
   - collision_ref_no
   - location_easting_osgr
@@ -204,10 +225,10 @@ known_issues:
      dates (e.g. 03/04/2025). This source's date format must always be
      set explicitly."
   - "This is a national (GB-wide) dataset, not a single-city dataset like
-     Chicago and NYC. `city` is left null in the canonical schema; any
-     analysis that groups by 'city' will need to either exclude this
-     source or use local_authority_district (kept in staging) at a
-     different granularity than the other two sources provide."
+     Chicago and NYC. Only Greater London (police_force 1 or 48) gets a
+     canonical `city` ('London'); every other row is null. City-level
+     analysis compares Chicago, New York City and London only, never a
+     city with the whole of Great Britain."
   - "num_killed, primary_cause, and crash_type are structurally
      unavailable in this file (they live in separate, unjoined STATS19
      tables - Casualties and a contributory-factors table). Left null

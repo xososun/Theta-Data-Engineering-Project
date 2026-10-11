@@ -45,3 +45,7 @@ data/incoming/*
 # Python caches (already covered but worth confirming)
 **/__pycache__/
 **/*.pyc
+
+# Pycharm (stuff)
+pyproject.toml
+uv.lock

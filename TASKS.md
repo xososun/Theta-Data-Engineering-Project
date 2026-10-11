@@ -46,7 +46,7 @@ defense, so skim the other two sections even if they aren't yours.
 ## Member C (Leyte) — Orchestration, Diagrams & Analytics
 *Can start diagrams/DAG skeleton immediately from existing schema/adapters; needs real data for the notebook.*
 
-- [x] Airflow DAG: `extract → stage → validate → harmonize → load → quality_report` — `dags/crash_pipeline.py` (2026-10-06)
+- [x] Airflow DAG: `extract → stage → validate → harmonize → validate_curated → publish → load → quality_report` — `dags/crash_pipeline.py` (2026-10-06; curated gate added 2026-10-11)
 - [x] Task dependencies, scheduling, retries, failure handling — in `dags/crash_pipeline.py`: per-source task groups via dynamic task mapping; weekly schedule; 2 retries with 2-min delay; `quality_report` uses `TriggerRule.ALL_DONE` so partial runs still report (2026-10-06)
 - [x] Architecture diagram (sources → ingestion → raw → validation → staging → curated → Postgres → orchestration → consumption) — `docs/diagrams/architecture.mmd`, embedded in `docs/diagrams.md` §1 (2026-10-06)
 - [x] Data flow / lineage diagram — `docs/diagrams/lineage.mmd`, embedded in `docs/diagrams.md` §2 (2026-10-06)
@@ -68,8 +68,30 @@ defense, so skim the other two sections even if they aren't yours.
 - [x] All three production extractors (Chicago, NYC, UK) + shared raw-layer/batch utils + Docker environment — Member A, see section above
 - [x] Diagrams index — `docs/diagrams.md`, with all three diagrams embedded and rendered via Mermaid — Member C (2026-10-06)
 
+## Instructor Feedback (2026-10-11)
+
+1. **Validation after harmonization**
+   - [x] Curated gate `src/validation/curated_checks.py`: schema and types, unique keys across sources, per-source row reconciliation, timestamps and date keys, partitions — results in `dq_run_log`
+   - [x] Write-audit-publish: harmonize writes a candidate; `validate_curated → publish → load` in the DAG; a failed check publishes and loads nothing
+   - [x] Harmonize reads the batches validated in the same run (not "newest on disk"); strict date parsing (no silent day/month swap)
+   - [x] Tests: `tests/test_curated_checks.py` (fault injection), DAG structure tests
+2. **Compare like with like**
+   - [x] UK `city = "London"` for Greater London (police force 1 and 48) — adapter + `uk_city()` + tests
+   - [x] Comparison frames shared by both notebooks (`notebooks/comparison_frames.py`): city geographies, injury crashes only, shared windows computed from the data, rates per 100k residents
+   - [x] Clustering on matched frames with each city's density-relative hotspot threshold
+   - [ ] Re-run both notebooks on the real data and write the two *Finding* cells
+   - [ ] (Optional) NYC backfill run for a three-way 2021–2025 frame
+3. **What the weekly schedule refreshes**
+   - [x] README section "What a Scheduled Run Refreshes"; data contract v1.2
+   - [x] SHA-256 change detection for Chicago/UK (unchanged file → previous batch reused, no new raw copy); newest Chicago export picked automatically
+   - [x] `source_freshness` row per source per run in `dq_run_log` (NEW / UNCHANGED / API window and lag)
+   - [x] A missing UK year fails the run
+   - [x] Tests: `tests/test_freshness.py`
+- [ ] Full run in Docker on the real data; update README figures and `outputs/quality_report_*.md`
+- [ ] Reflect these changes in the final paper
+
 ## Not Yet Assigned
 - [x] README updates as each workstream lands
 - [ ] Final technical report
-- [x] Presentation slides
+- [ ] Presentation slides
 - [ ] Individual Q&A prep (everyone, not delegable)

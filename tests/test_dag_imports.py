@@ -71,6 +71,8 @@ def test_expected_tasks(dag):
         "per_source.stage",
         "per_source.validate",
         "harmonize",
+        "validate_curated",
+        "publish",
         "load",
         "quality_report",
     }
@@ -83,14 +85,22 @@ def test_per_source_chain_is_mapped(dag):
 
 
 def test_dependencies(dag):
-    """per-source chain, then fan-in to a single harmonize -> load -> report."""
+    """per-source chain, then fan-in: harmonize -> validate_curated -> publish -> load -> report."""
     up = lambda tid: dag.get_task(tid).upstream_task_ids  # noqa: E731
     assert up("per_source.extract") == set()
     assert up("per_source.stage") == {"per_source.extract"}
     assert up("per_source.validate") == {"per_source.stage"}
     assert up("harmonize") == {"per_source.validate"}
-    assert up("load") == {"harmonize"}
+    assert up("validate_curated") == {"harmonize"}
+    assert up("publish") == {"validate_curated"}
+    assert up("load") == {"publish"}
     assert up("quality_report") == {"load"}
+
+
+def test_curated_gate_blocks_publish_and_load(dag):
+    """A failed curated check must stop publish and load (default all_success)."""
+    for tid in ("validate_curated", "publish", "load"):
+        assert dag.get_task(tid).trigger_rule == "all_success", tid
 
 
 def test_harmonize_requires_all_sources_to_pass(dag):
@@ -107,6 +117,7 @@ def test_retries(dag):
     assert dag.get_task("per_source.extract").retries == 2
     assert dag.get_task("load").retries == 2
     assert dag.get_task("per_source.validate").retries == 0
+    assert dag.get_task("validate_curated").retries == 0
 
 
 def test_schedule(dag):

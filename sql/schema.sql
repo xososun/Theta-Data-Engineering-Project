@@ -69,7 +69,7 @@ CREATE TABLE fact_crash (
     police_notified_timestamp_utc TIMESTAMPTZ,          -- NULL for nyc_us, uk_stats19 (no source field)
 
     -- Location
-    city                         TEXT,                  -- NULL for uk_stats19 (national dataset)
+    city                         TEXT,                  -- uk_stats19: 'London' for Greater London, else NULL
     country                      CHAR(2) NOT NULL,
     latitude                     DOUBLE PRECISION,
     longitude                    DOUBLE PRECISION,

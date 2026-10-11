@@ -42,6 +42,8 @@ HAVING COUNT(*) > 1;
 
 -- -----------------------------------------------------------------------------
 -- 3. Crashes per year per source (join to dim_date).
+--    COVERAGE ONLY, not a comparison: the sources differ in place, period
+--    and what they record (see queries 7 and 14 for like-for-like).
 --    Chicago before 2018 is partial coverage (districts were onboarded
 --    gradually), so start citywide trends at 2018.
 -- -----------------------------------------------------------------------------
@@ -105,18 +107,24 @@ ORDER BY source_id,
 
 
 -- -----------------------------------------------------------------------------
--- 7. Fatal share among INJURY crashes only: the closest like-for-like rule.
---    Restricting every source to crashes with an injury puts Chicago and NYC
---    on the same footing as STATS19, which only records injury collisions.
+-- 7. Fatal share among injury crashes, like for like: Chicago vs London.
+--    Same kind of place (city geographies: Chicago, and Greater London via
+--    city = 'London'), same kind of event (injury crashes, the only kind
+--    STATS19 records) and the same period (2021-2025, the years both cover).
+--    Dates are LOCAL dates, not the UTC crash_date_key.
 -- -----------------------------------------------------------------------------
 SELECT
-    source_id,
+    f.city,
     COUNT(*)                                             AS injury_crashes,
-    COUNT(*) FILTER (WHERE severity = 'fatal')           AS fatal_crashes,
-    ROUND(100.0 * COUNT(*) FILTER (WHERE severity = 'fatal') / COUNT(*), 3) AS pct_fatal
-FROM fact_crash
-WHERE severity IN ('fatal', 'serious', 'minor')
-GROUP BY source_id
+    COUNT(*) FILTER (WHERE f.severity = 'fatal')         AS fatal_crashes,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE f.severity = 'fatal') / COUNT(*), 3) AS pct_fatal
+FROM fact_crash f
+JOIN dim_source s ON s.source_id = f.source_id
+WHERE f.severity IN ('fatal', 'serious', 'minor')
+  AND f.city IN ('Chicago', 'London')
+  AND (f.crash_timestamp_utc AT TIME ZONE s.source_local_timezone)::date
+      BETWEEN DATE '2021-01-01' AND DATE '2025-12-31'
+GROUP BY f.city
 ORDER BY pct_fatal DESC;
 
 
@@ -239,3 +247,46 @@ SELECT DISTINCT ON (source_id, check_name)
     run_timestamp
 FROM dq_run_log
 ORDER BY source_id, check_name, run_timestamp DESC;
+
+
+-- -----------------------------------------------------------------------------
+-- 14. Injury and fatal crashes per 100,000 residents per year, like for like.
+--     Exposure denominator: residents (2020 US Census for Chicago; 2021 ONS
+--     Census for Greater London). Same geography, event rule and window as
+--     query 7. Residents are a coarse exposure measure: they ignore
+--     commuters, visitors and distance travelled.
+-- -----------------------------------------------------------------------------
+WITH population(city, residents) AS (
+    VALUES ('Chicago', 2746388), ('London', 8799800)
+),
+window_days AS (
+    SELECT (DATE '2025-12-31' - DATE '2021-01-01' + 1) / 365.25 AS years
+)
+SELECT
+    f.city,
+    COUNT(*)                                                     AS injury_crashes,
+    ROUND(COUNT(*) / w.years / p.residents * 100000, 1)          AS injury_per_100k_per_year,
+    ROUND(COUNT(*) FILTER (WHERE f.severity = 'fatal') / w.years / p.residents * 100000, 2)
+                                                                 AS fatal_per_100k_per_year
+FROM fact_crash f
+JOIN dim_source s ON s.source_id = f.source_id
+JOIN population p ON p.city = f.city
+CROSS JOIN window_days w
+WHERE f.severity IN ('fatal', 'serious', 'minor')
+  AND (f.crash_timestamp_utc AT TIME ZONE s.source_local_timezone)::date
+      BETWEEN DATE '2021-01-01' AND DATE '2025-12-31'
+GROUP BY f.city, p.residents, w.years
+ORDER BY f.city;
+
+
+-- -----------------------------------------------------------------------------
+-- 15. What did each run refresh? Latest source_freshness row per source.
+--     NEW = new file content ingested; UNCHANGED = the Chicago/UK file in
+--     data/incoming/ was not replaced, so the previous batch was reused;
+--     NYC shows the API window and publication lag.
+-- -----------------------------------------------------------------------------
+SELECT DISTINCT ON (source_id)
+    source_id, status, run_timestamp, LEFT(details, 160) AS details
+FROM dq_run_log
+WHERE check_name = 'source_freshness'
+ORDER BY source_id, run_timestamp DESC;

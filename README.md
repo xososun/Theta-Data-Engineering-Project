@@ -51,20 +51,66 @@ months, so its window ends at the newest date the API has, not today.
 
 Provenance, licence, and known issues for each source are recorded in its
 adapter (`config/adapters/*.yaml`) and in `docs/data_dictionary.md`. The
-NYC source is the programmatically retrieved one.
+NYC source is the programmatically retrieved one; Chicago and UK are
+files placed by hand, which limits what a scheduled run can refresh (next
+section).
+
+**City geography for the UK.** STATS19 is national. For city-level
+comparison, collisions handled by the Metropolitan Police (police force
+code 1) or the City of London Police (48) get `city = "London"`; together
+those two forces cover exactly Greater London. All other UK collisions
+keep `city = null`.
+
+## What a Scheduled Run Refreshes
+
+The DAG runs weekly, but only one of the three sources can bring in new
+data on its own:
+
+| Source | How new data arrives | What a scheduled run does | How it is detected and recorded |
+|---|---|---|---|
+| `nyc_us` | Pulled from the NYC Open Data API every run | Re-pulls the 90 days ending at the newest date the API has published, and UPSERTs it (picks up new crashes and late amendments) | `source_freshness` row: the window pulled and how many days the newest published date lags the run; **warn** if the lag exceeds 180 days |
+| `chicago_us` | **A person downloads the export** into `data/incoming/` | Uses the newest `Traffic_Crashes_-_Crashes_*.csv` (the export date is in the name). If that file has not been replaced, the run has **no new Chicago data** | SHA-256 compared with the last raw batch. **NEW**: new raw batch, manifest records `content_changed` and the previous batch. **UNCHANGED**: no new raw copy, the previous batch is reused; **warn** after 14 days unchanged |
+| `uk_stats19` | **A person downloads the annual files** into `data/incoming/` (DfT publishes yearly, with occasional revisions) | Re-reads the five files 2021–2025. If none has been replaced, there is **no new UK data**. A missing year fails the run | Same SHA-256 comparison across all five files; **warn** after 400 days unchanged |
+
+So a scheduled run can only use newer Chicago or UK data after someone
+replaces those files; until then it re-validates and re-loads the same
+batch, and says so. Every run writes one `source_freshness` row per
+source to `dq_run_log`, and the quality report lists them first, so each
+run states exactly which sources it refreshed.
+
+**To refresh Chicago:** export the full dataset as CSV from the portal
+and save it in `data/incoming/` with the portal's name (older exports can
+stay; the newest name is used). **To refresh the UK:** replace the revised
+annual file(s); to add a year, also add it to `UK_YEARS` in the DAG.
+**To backfill NYC history** (for example to compare all three cities over
+2021–2025), trigger one run with a wider window:
+
+```bash
+docker compose exec airflow-scheduler airflow dags trigger crash_pipeline --conf '{"nyc_since": "2021-01-01", "nyc_until": "2025-12-31"}'
+```
+
+Postgres keeps the backfilled rows; the next scheduled run returns the
+curated Parquet to the rolling 90-day window.
 
 ## Architecture
 
 ```
 Chicago CSV ─┐
 NYC API ─────┼─► extract ─► data/raw/ ─► stage ─► data/staging/ ─► validate ─┐
-UK CSVs ─────┘   (per source, in parallel)                    (writes dq_run_log)
-                                                                              │
-          ┌───────────────────────────────────────────────────────────────────┘
+UK CSVs ─────┘   (per source, in parallel)                    (8 checks → dq_run_log)
+                 records source_freshness                                      │
+          ┌────────────────────────────────────────────────────────────────────┘
           ▼
-      harmonize ─► data/curated/ (partitioned Parquet) ─► load ─► PostgreSQL ─► quality report
-      (all sources at once)                                       (UPSERT)
+      harmonize ─► data/curated/_candidate/ ─► validate_curated ─► publish ─► data/curated/fact_crash/
+      (validated batches,                     (5 checks →          (swap      │
+       all sources at once)                    dq_run_log)          live)     ▼
+                                                                   load ─► PostgreSQL ─► quality report
+                                                                          (UPSERT)
 ```
+
+Harmonization follows a **write-audit-publish** pattern: it writes a
+candidate, a second validation gate audits the combined result, and only
+an audited candidate is published and loaded.
 
 Airflow schedules and monitors every stage; Docker Compose runs Postgres,
 Airflow, and the pipeline code in one reproducible environment.
@@ -94,9 +140,15 @@ Compose, Git/GitHub.
 
 - `chicago_extractor.py`: bulk CSV, byte-for-byte raw-layer copy; rejects
   missing or corrupt files with a clean error rather than a stack trace.
-- `uk_extractor.py`: loops over the 5 configured years independently. A
-  missing or ambiguous year fails that year only (clearly reported,
-  non-zero exit) without discarding the years that succeeded.
+  In the DAG it reads the newest export in `data/incoming/`.
+- `uk_extractor.py`: loops over the 5 configured years independently, so
+  every missing or ambiguous year is reported together. In the DAG, any
+  missing year fails the run (no partial UK load).
+- **Change detection** (`src/utils/freshness.py`): before copying, the
+  Chicago and UK extractors compare the incoming files' SHA-256 with the
+  last raw batch. Unchanged files are not copied again; the previous batch
+  is reused and reported as UNCHANGED (see "What a Scheduled Run
+  Refreshes"). `--force-new-batch` overrides this.
 - `nyc_extractor.py`: paginated REST API extractor. Retries transient
   failures (timeouts, 5xx) with backoff, fails fast on permanent errors
   (4xx), treats 0 rows as a failure rather than a silent empty success,
@@ -139,9 +191,18 @@ Compose, Git/GitHub.
 - Verified: Chicago 1,096,581, UK 513,801, NYC 1,793 rows; raw → staged
   counts match exactly.
 
-### Data-quality validation (`src/validation/checks.py`)
+### Data-quality validation (`src/validation/`)
 
-Eight automated checks run on every staged batch: schema, nullability,
+Validation runs at three points, and every result is a row in
+`dq_run_log`:
+
+1. **`source_freshness`** (extract): did new data arrive? See "What a
+   Scheduled Run Refreshes".
+2. **Staging checks** (`checks.py`, per source, before harmonization).
+3. **Curated checks** (`curated_checks.py`, once, after harmonization and
+   before publish and load).
+
+**Staging checks.** Eight automated checks run on every staged batch: schema, nullability,
 uniqueness, accepted values, ranges, date logic, referential integrity,
 and row counts. Each check writes one row to `dq_run_log` with its
 status (`pass` / `warn` / `fail`), rows checked, rows failed, and
@@ -155,15 +216,43 @@ precedes the crash) is tolerated explicitly. Implausible speed limits are
 flagged as `warn`, not rejected. Verified across all three sources: 22
 pass, 2 warn, 0 fail.
 
+**Curated checks.** Passing staging checks does not prove the combined
+result is right: harmonization parses each source's date format,
+converts to UTC, derives `crash_date_key`, casts types and partitions the
+data, and a mistake there would pass every staging check. Five checks
+audit the harmonized candidate:
+
+| Check | Fails when |
+|---|---|
+| `curated_schema_check` | a canonical field or `crash_date_key` is missing or has the wrong Parquet type (e.g. a timestamp that is not UTC) |
+| `curated_uniqueness_check` | `(source_id, source_record_id)` or `crash_id` repeats across all sources, or a `crash_id` is not `<source_id>:<source_record_id>` |
+| `curated_reconciliation_check` | per source: a validated batch is missing, rows come from a different batch, or staged rows ≠ curated + excluded with exclusions above 0.1% (minimum allowance 25 rows) |
+| `curated_timestamp_check` | per source: a null, pre-2000 or future crash timestamp, or a `crash_date_key` that is not the timestamp's UTC date |
+| `curated_partition_check` | a row sits in a year/month partition that does not match its timestamp, partition folders do not match the data, a file is empty, or the file count differs from what harmonize reported |
+
+A `fail` stops the run before `publish`, so the live curated Parquet and
+Postgres keep the previous good data, and the failed candidate stays in
+`data/curated/_candidate/` for inspection. Tested end to end on
+synthetic data by injecting a wrong UK date format into harmonization:
+all staging checks passed, `curated_reconciliation_check` failed for the
+UK (61% of rows unparseable), `publish` and `load` did not run, and the
+live Parquet and Postgres were unchanged.
+
 ### Curated layer and partitioning (`src/transform/curated.py`)
 
-- Reads the newest staging batch for every source, parses each source's
-  timestamp format, converts local time to UTC, casts columns to
-  canonical types, and adds `crash_date_key` (foreign key to `dim_date`).
-- Writes partitioned Parquet at
-  `data/curated/fact_crash/source_id=<id>/year=<YYYY>/month=<MM>/`.
-  Rerun-safe through replace semantics: the previous curated output is
-  removed and rewritten, never appended to.
+- Reads exactly the staged batches validated in the same run, parses
+  each source's timestamp format, converts local time to UTC, casts
+  columns to canonical types, and adds `crash_date_key` (foreign key to
+  `dim_date`). Sources with an explicit date format are parsed strictly:
+  a wrong format makes rows fail (caught by the curated checks) instead
+  of letting pandas guess and swap day and month.
+- **Write-audit-publish:** writes a candidate at
+  `data/curated/_candidate/fact_crash/`, which `curated_checks.py`
+  audits; `publish()` then swaps it into
+  `data/curated/fact_crash/source_id=<id>/year=<YYYY>/month=<MM>/` with
+  two directory renames, so readers never see a half-written dataset.
+  Rerun-safe: the candidate and the live dataset are replaced, never
+  appended to.
 - **Partition key rationale:** `source_id` first, because most analyses
   compare or isolate cities; then `year` / `month`, because crash
   analysis is time-windowed (trends, seasonality) and monthly files stay
@@ -213,7 +302,9 @@ One DAG, `crash_pipeline`:
 
 - **Per source, in parallel** (dynamic task mapping over `chicago_us`,
   `nyc_us`, `uk_stats19`): `extract → stage → validate`.
-- **Once, after all three sources succeed:** `harmonize → load`.
+- **Once, after all three sources succeed:**
+  `harmonize → validate_curated → publish → load`. `harmonize` receives
+  the batch each source validated in this run.
 - **Always last:** `quality_report` (trigger rule `ALL_DONE`), which
   summarizes this run's `dq_run_log` rows into
   `data/quality_reports/quality_report_<timestamp>.md` even when an
@@ -221,14 +312,18 @@ One DAG, `crash_pipeline`:
   `quality_report` then fails itself if any upstream task failed;
   otherwise a run with a failed validation would show as green.
 - Weekly schedule (`0 6 * * 1`), `catchup=False`, `max_active_runs=1`.
-  Tasks retry twice with a 2-minute delay, except `validate` and
-  `quality_report`: a failed data-quality check is deterministic, so
-  retrying would only fail again and duplicate its `dq_run_log` rows.
+  Tasks retry twice with a 2-minute delay, except `validate`,
+  `validate_curated` and `quality_report`: a failed data-quality check is
+  deterministic, so retrying would only fail again and duplicate its
+  `dq_run_log` rows. A missing UK year also fails without retries.
+- Optional run configuration `nyc_since` / `nyc_until` widens the NYC
+  window for a one-off backfill.
 
-`harmonize` deliberately keeps the default `all_success` trigger rule.
-Staging output is written before validation runs, so a batch that failed
-its checks still sits in `data/staging/` as the newest batch; letting
-harmonize run anyway would publish data that failed validation.
+`harmonize`, `validate_curated`, `publish` and `load` keep the default
+`all_success` trigger rule: a failed source validation or a failed
+curated check stops everything after it. Because `harmonize` reads the
+batches validated in this run rather than the newest batch on disk, a
+batch that failed validation in an earlier run can never be picked up.
 
 The DAG contains no transformation logic: each task calls a function from
 `src/`, so every stage can also be run by hand (see "Running Stages
@@ -247,20 +342,49 @@ Manually").
 
 ### Tests (`tests/`)
 
-- `test_nyc_extractor.py`: 6 mocked-API tests for retry and error
+74 tests:
+
+- `test_nyc_extractor.py` (6): mocked-API tests for retry and error
   handling.
-- `test_staging.py`: 8 tests for mapping primitives and sentinel handling.
-- `test_validation.py`: 12 tests for check logic, structural-gap skipping,
-  and anomaly tolerance.
-- `test_dag_imports.py`: structural tests for the DAG (imports
-  cleanly; expected tasks, mapping, fan-in dependencies, trigger rules,
-  retries, schedule). Needs Airflow, so run it inside the container.
+- `test_staging.py` (16): mapping primitives, sentinel handling, and the
+  UK London mapping.
+- `test_validation.py` (12): staging check logic, structural-gap
+  skipping, and anomaly tolerance.
+- `test_curated_checks.py` (15): harmonize a small candidate, audit it,
+  and inject faults the staging checks cannot see (wrong date format for
+  one source, a partition in the wrong month, a batch mismatch, duplicate
+  keys, date-key mismatches); publish swap.
+- `test_freshness.py` (11): unchanged files reuse the previous batch,
+  replaced files create a new one, the newest Chicago export is picked,
+  and the pass/warn rules for `source_freshness`.
+- `test_dag_imports.py` (14): structural tests for the DAG (imports
+  cleanly; expected tasks, mapping, dependencies including the curated
+  gate, trigger rules, retries, schedule). Needs Airflow, so run it
+  inside the container.
 
 ### Analytics (bonus)
 
 `notebooks/eda.ipynb` and `notebooks/clustering.ipynb` run against the
 curated Parquet output. Analytics is supplementary; the production
 pipeline lives entirely in `src/` and `dags/`.
+
+Both notebooks compare **like with like** through the comparison frames
+in `notebooks/comparison_frames.py`:
+
+- **Place:** city geographies only: Chicago, New York City, and Greater
+  London. The rest of Great Britain is never compared with a city.
+- **Event:** injury crashes only (`fatal` / `serious` / `minor`), the only
+  kind STATS19 records.
+- **Period:** the dates both cities cover, computed from the data:
+  Chicago vs London 2021–2025, Chicago vs NYC inside NYC's window. NYC
+  and London do not overlap, so no three-way comparison is made (a NYC
+  backfill would enable one automatically).
+- **Exposure:** rates per 100,000 residents per year (2020 US Census;
+  2021 ONS Census), and shares within each city. Raw totals are not
+  compared.
+- **Hotspots:** clustering uses the same frames, and each city's
+  threshold is relative to its own average injury-crash density, so
+  hotspot results compare concentration rather than volume.
 
 ## Data Layers
 
@@ -277,7 +401,8 @@ pipeline lives entirely in `src/` and `dags/`.
   nulled; timestamps still in source-local string form.
 - **`data/curated/`**: partitioned Parquet produced by `curated.py`
   (`fact_crash/source_id=<id>/year=<YYYY>/month=<MM>/`), plus
-  `format_benchmark/`.
+  `format_benchmark/`. `_candidate/` exists only between harmonize and
+  publish, or after a failed curated check.
 
 ## Repository Structure
 
@@ -303,7 +428,7 @@ pipeline lives entirely in `src/` and `dags/`.
 │   ├── data_contract.md
 │   ├── diagrams.md
 │   └── diagrams/               # architecture.mmd, lineage.mmd, erd.mmd
-├── notebooks/                  # eda.ipynb, clustering.ipynb (bonus analytics)
+├── notebooks/                  # eda.ipynb, clustering.ipynb, comparison_frames.py (bonus analytics)
 ├── outputs/                    # committed evidence from real runs (data/ is gitignored)
 │   ├── format_benchmark.md     # CSV vs JSON vs Parquet results
 │   ├── quality_report_*.md     # data-quality report from a full DAG run
@@ -315,10 +440,10 @@ pipeline lives entirely in `src/` and `dags/`.
 ├── src/
 │   ├── extract/                # chicago, nyc, uk extractors
 │   ├── transform/              # staging, derivations, curated, format_compare
-│   ├── validation/             # checks.py, quality_report.py
+│   ├── validation/             # checks.py (staging), curated_checks.py (curated gate), quality_report.py
 │   ├── load/                   # load_postgres.py
 │   ├── profiling/              # profile_crashes.py
-│   └── utils/                  # batch, config, db, paths, raw_writer
+│   └── utils/                  # batch, config, db, freshness, paths, raw_writer
 └── tests/
 ```
 
@@ -414,7 +539,7 @@ service. Paths are **container** paths (`/opt/airflow/...`). The commands
 are single-line, so they work unchanged in PowerShell, bash, and cmd.
 
 ```bash
-# 1. Extract (writes data/raw/<source_id>/<batch_id>/)
+# 1. Extract (writes data/raw/<source_id>/<batch_id>/; an unchanged Chicago/UK file reuses the last batch, add --force-new-batch to override)
 docker compose run --rm pipeline python src/extract/chicago_extractor.py --input /opt/airflow/data/incoming/Traffic_Crashes_-_Crashes_20260923.csv --raw-root /opt/airflow/data/raw
 docker compose run --rm pipeline python src/extract/uk_extractor.py --input-dir /opt/airflow/data/incoming --raw-root /opt/airflow/data/raw
 docker compose run --rm pipeline python src/extract/nyc_extractor.py --since 2025-09-01 --until 2025-09-07 --raw-root /opt/airflow/data/raw
@@ -423,10 +548,12 @@ docker compose run --rm pipeline python src/extract/nyc_extractor.py --since 202
 docker compose run --rm pipeline python src/transform/staging.py --source chicago_us --batch <batch_id>
 docker compose run --rm pipeline python src/validation/checks.py --source chicago_us --batch <batch_id>
 
-# 3. Harmonize all sources into partitioned curated Parquet
+# 3. Harmonize into a candidate, audit it, then publish it (write-audit-publish)
 docker compose run --rm pipeline python src/transform/curated.py
+docker compose run --rm pipeline python src/validation/curated_checks.py
+docker compose run --rm pipeline python src/transform/curated.py --publish
 
-# 4. Load into PostgreSQL (add --source <id> for one source, --dry-run to skip writes)
+# 4. Load the published data into PostgreSQL (add --source <id> for one source, --dry-run to skip writes)
 docker compose run --rm pipeline python src/load/load_postgres.py
 
 # Partition-pruned read demo
@@ -451,17 +578,18 @@ for the full option list.
 
 ### Representative queries
 
-[`sql/queries.sql`](sql/queries.sql) has 13 commented queries, each noting
+[`sql/queries.sql`](sql/queries.sql) has 15 commented queries, each noting
 the structural gaps it respects:
 
 - **Verification:** rows per source and batch; duplicate natural keys
   (expected: none, the rerun-safety check); latest result per
-  data-quality check.
-- **Analysis:** crashes per year; hour and weekday profiles in each
-  city's local time; severity mix; fatal share among injury crashes only
-  (the like-for-like comparison); Chicago's leading causes of serious
-  crashes; a monthly trend with a rolling average; a spatial
-  bounding-box query.
+  data-quality check; what the latest run refreshed (`source_freshness`).
+- **Analysis:** crashes per year (coverage only); hour and weekday
+  profiles in each city's local time; severity mix; like-for-like
+  Chicago vs London comparisons (city geographies, injury crashes,
+  2021–2025): fatal share and rates per 100,000 residents per year;
+  Chicago's leading causes of serious crashes; a monthly trend with a
+  rolling average; a spatial bounding-box query.
 - **Engineering:** an `EXPLAIN` showing a one-source, one-month query
   using `idx_fact_crash_source_date` instead of a full scan; tracing one
   record back to its raw batch folder and that batch's quality checks.
@@ -472,16 +600,19 @@ Run the whole file:
 docker compose exec -T postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB> < sql/queries.sql
 ```
 
-For example, the like-for-like fatal rate:
+For example, the like-for-like fatal share (query 7):
 
 ```sql
-SELECT source_id,
+SELECT f.city,
        COUNT(*) AS injury_crashes,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE severity = 'fatal') / COUNT(*), 3) AS pct_fatal
-FROM fact_crash
-WHERE severity IN ('fatal', 'serious', 'minor')
-GROUP BY source_id
-ORDER BY pct_fatal DESC;
+       ROUND(100.0 * COUNT(*) FILTER (WHERE f.severity = 'fatal') / COUNT(*), 3) AS pct_fatal
+FROM fact_crash f
+JOIN dim_source s ON s.source_id = f.source_id
+WHERE f.severity IN ('fatal', 'serious', 'minor')
+  AND f.city IN ('Chicago', 'London')
+  AND (f.crash_timestamp_utc AT TIME ZONE s.source_local_timezone)::date
+      BETWEEN DATE '2021-01-01' AND DATE '2025-12-31'
+GROUP BY f.city;
 ```
 
 ## Rerun Safety
@@ -491,9 +622,9 @@ never duplicates data:
 
 | Layer | Strategy |
 |---|---|
-| Raw | Every run writes a new batch folder with a unique batch ID; batches are never overwritten, which preserves history and lineage. |
+| Raw | New content gets a new batch folder with a unique batch ID; batches are never overwritten, which preserves history and lineage. An unchanged Chicago/UK file reuses the previous batch instead of being copied again. |
 | Staging | Written per `(source_id, batch_id)`; rerunning a batch overwrites that batch's file. |
-| Curated | Replace semantics: the curated output is removed and rewritten from the newest batch per source. |
+| Curated | Write-audit-publish: a candidate is rebuilt from this run's validated batches, audited, and swapped in; a failed audit leaves the live data untouched. |
 | PostgreSQL | UPSERT on `(source_id, source_record_id)`; `dim_date` uses `ON CONFLICT DO NOTHING`. |
 
 ## Expected Outputs
@@ -502,10 +633,10 @@ never duplicates data:
 |---|---|
 | Raw batches + manifests | `data/raw/<source_id>/<batch_id>/` |
 | Staged batches | `data/staging/<source_id>/<batch_id>/fact_crash.parquet` |
-| Curated partitioned dataset | `data/curated/fact_crash/source_id=*/year=*/month=*/` |
+| Curated partitioned dataset | `data/curated/fact_crash/source_id=*/year=*/month=*/` (candidate during a run: `data/curated/_candidate/`) |
 | Format benchmark report | `data/curated/format_benchmark/format_benchmark.md` (committed copy: `outputs/format_benchmark.md`) |
 | Curated tables | PostgreSQL: `fact_crash`, `dim_source`, `dim_date` |
-| Validation results | PostgreSQL: `dq_run_log` |
+| Validation results | PostgreSQL: `dq_run_log` (`source_freshness`, 8 staging checks per source, 5 `curated_*` checks) |
 | Data-quality reports | `data/quality_reports/quality_report_<timestamp>.md` (committed copy: `outputs/quality_report_*.md`) |
 | Source profiling reports | `outputs/profiling/*.json` |
 
@@ -518,12 +649,23 @@ never duplicates data:
   availability matrix in `docs/data_dictionary.md`.
 - **`hit_and_run`** is a real signal only for Chicago; NYC and UK default
   to `false`.
-- **UK is national, not a city.** `city` is null for `uk_stats19`, so
-  city-level comparisons must exclude it or use a different granularity.
+- **UK is national, not a city.** Only Greater London rows get a `city`
+  (`"London"`, from police force codes 1 and 48); all other UK rows have
+  `city = null` and are excluded from city-level comparisons.
+- **Chicago and UK refresh only when someone replaces their files.**
+  Scheduled runs re-validate the same batch and report UNCHANGED until
+  then (see "What a Scheduled Run Refreshes").
+- **Residents are a coarse exposure measure.** Per-capita rates ignore
+  commuters, visitors and distance travelled; census counts are used for
+  every year of a window. Vehicle-miles travelled would be better.
+- **Injury definitions still differ.** Comparisons use injury crashes
+  only, but STATS19's "fatal" is a death within 30 days, Chicago counts
+  "reported, not evident" injuries, and NYC cannot record `serious`.
 - **Chicago 2013–2017** is partial coverage (districts were onboarded
   gradually); citywide trends are most comparable from 2018 onward.
 - **NYC is a rolling window** in scheduled runs (90 days), not the full
-  history.
+  history, so with the current load NYC and London share no period. A
+  backfill run (`nyc_since` / `nyc_until`) adds history to Postgres.
 - **Out of scope for v1:** `fact_person`, `fact_vehicle`, and
   `dim_location`, which were mentioned in the proposal draft.
 - **Daylight-saving exclusion.** Crashes timestamped in a DST transition
@@ -560,6 +702,14 @@ never duplicates data:
 - **`harmonize` shows `upstream_failed`.** At least one source failed
   validation. Check that source's `validate` task log, the newest file in
   `data/quality_reports/`, or `dq_run_log`.
+- **`validate_curated` failed.** Harmonization produced something the
+  curated checks rejected. The task log names the check and source; the
+  candidate is kept in `data/curated/_candidate/` for inspection, and the
+  live data was not changed.
+- **UK extract fails with "UK extract incomplete".** One of the five
+  annual files is missing or unreadable in `data/incoming/`.
+- **`source_freshness` warns.** Chicago or UK input has not changed for
+  longer than its `max_unchanged_days`; download a new export.
 - **Host paths in commands.** Inside containers, always use
   `/opt/airflow/...` paths, not Windows or host paths.
 
@@ -567,6 +717,11 @@ never duplicates data:
 
 - Retrieve Chicago through its Socrata API instead of a manual bulk
   download, making all three sources fully automated.
+- Skip re-staging an unchanged Chicago/UK batch when its adapter YAML
+  is also unchanged (today it is re-staged and re-validated every run).
+- Use a travel-based exposure denominator (vehicle-miles travelled) for
+  cross-city rates, and backfill NYC history so all three cities share a
+  window.
 - Add the STATS19 Casualties and contributory-factors tables as sources
   to fill the UK gaps (`num_killed`, `primary_cause`).
 - Have `curated.py` read date formats and time zones from the adapter

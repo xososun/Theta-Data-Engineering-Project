@@ -2,9 +2,11 @@
 """
 quality_report.py
 
-Summarizes the data-quality results that checks.py wrote to dq_run_log
-during one pipeline run, and writes them as a Markdown report under
-data/quality_reports/. Read-only: never modifies fact_crash or dq_run_log.
+Summarizes everything one pipeline run wrote to dq_run_log: the
+source_freshness row per source (did new data arrive?), the staging
+checks (checks.py) and the curated checks (curated_checks.py). Writes a
+Markdown report under data/quality_reports/. Read-only: never modifies
+fact_crash or dq_run_log. Cross-source rows appear as "all sources".
 
 Called by the final task of the Airflow DAG (which runs even when earlier
 stages failed), and runnable by hand:
@@ -36,7 +38,7 @@ QUERY = """
            rows_checked, rows_failed, details, run_timestamp
     FROM dq_run_log
     WHERE run_timestamp >= %s
-    ORDER BY source_id, batch_id, run_timestamp, check_name
+    ORDER BY source_id NULLS LAST, batch_id, run_timestamp, check_name
 """
 
 
@@ -55,7 +57,7 @@ def _render_markdown(rows: list[dict], since: datetime, counts: dict) -> str:
         f"Checks run since {since.isoformat()}",
         "",
         f"**{counts['pass']} pass, {counts['warn']} warn, {counts['fail']} fail** "
-        f"across {len({r['source_id'] for r in rows})} source(s).",
+        f"across {len({r['source_id'] for r in rows if r['source_id']})} source(s).",
         "",
     ]
     if not rows:
@@ -70,7 +72,7 @@ def _render_markdown(rows: list[dict], since: datetime, counts: dict) -> str:
     for r in rows:
         details = (r["details"] or "").replace("|", "\\|").replace("\n", " ")[:200]
         lines.append(
-            f"| {r['source_id']} | {r['batch_id']} | {r['check_name']} | "
+            f"| {r['source_id'] or 'all sources'} | {r['batch_id']} | {r['check_name']} | "
             f"{r['status'].upper()} | {r['rows_checked']:,} | {r['rows_failed']:,} | {details} |"
         )
     return "\n".join(lines) + "\n"
@@ -93,7 +95,7 @@ def build_quality_report(since: datetime, report_root: Path = REPORT_ROOT) -> di
 
     for r in rows:
         if r["status"] != "pass":
-            log.warning("[quality] %s %s %s: %s", r["source_id"], r["check_name"],
+            log.warning("[quality] %s %s %s: %s", r["source_id"] or "all sources", r["check_name"],
                         r["status"].upper(), (r["details"] or "")[:200])
     log.info("[quality] %d checks: %d pass, %d warn, %d fail -> %s",
              len(rows), counts["pass"], counts["warn"], counts["fail"], report_path)

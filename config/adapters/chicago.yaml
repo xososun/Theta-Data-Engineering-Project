@@ -35,6 +35,22 @@ source_local_timezone: America/Chicago
 # this file if either changes.
 date_format: "mixed"
 
+# How new data reaches the pipeline. Chicago is a LOCAL FILE source: a
+# scheduled run can only use newer data after someone replaces the export
+# in data/incoming/. The extractor picks the newest file matching
+# incoming_pattern (the portal ends the name with the export date) and
+# compares its SHA-256 with the last raw batch; an unchanged file is not
+# copied again and is reported as UNCHANGED in the source_freshness row of
+# dq_run_log. After max_unchanged_days, that row becomes a warning.
+refresh:
+  method: local_file
+  incoming_pattern: "Traffic_Crashes_-_Crashes_*.csv"
+  max_unchanged_days: 14      # the portal publishes daily; a 2-week-old export is stale
+  how_to_refresh: >
+    Export the full dataset as CSV from dataset_url and save it in
+    data/incoming/ with the portal's file name. Older exports may stay;
+    the newest name is used.
+
 bounding_box:
   latitude: [41.60, 42.05]
   longitude: [-87.95, -87.50]
@@ -105,8 +121,10 @@ field_mapping:
     default: false
 
 # Columns present in the source but not mapped to canonical fields.
-# Kept for lineage and in case a later analysis needs them; never promoted
-# to the cross-city curated table without an explicit schema change.
+# Despite the key name, staging.py writes only canonical fields: these
+# columns are NOT in the staging Parquet. They remain available in the raw
+# layer (data/raw/<source_id>/<batch_id>/), which keeps every batch, and
+# are never promoted to the curated table without a schema change.
 unmapped_columns_kept_in_staging:
   - CRASH_DATE_EST_I
   - TRAFFIC_CONTROL_DEVICE

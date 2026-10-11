@@ -39,6 +39,16 @@ bounding_box:
 # boundaries when many rows share the same crash_date. Confirmed via a
 # real 10,000-row pull: date-only ordering produced 4 duplicate
 # collision_id rows, all exactly at page boundaries.
+# How new data reaches the pipeline. NYC is an API source: every run pulls
+# the 90 days ending at the newest date the API has published (the DAG's
+# NYC_TRAILING_WINDOW_DAYS), so a scheduled run always refreshes it. The
+# source_freshness row in dq_run_log records the window and the
+# publication lag, and warns if the newest published date falls further
+# behind than max_publication_lag_days.
+refresh:
+  method: api
+  max_publication_lag_days: 180
+
 pagination:
   page_size: 1000
   order_by: "crash_date DESC, collision_id DESC"
@@ -129,6 +139,11 @@ field_mapping:
     # guessing from free text.
     literal: false
 
+# Columns present in the source but not mapped to canonical fields.
+# Despite the key name, staging.py writes only canonical fields: these
+# columns are NOT in the staging Parquet. They remain available in the raw
+# layer (data/raw/<source_id>/<batch_id>/), which keeps every batch, and
+# are never promoted to the curated table without a schema change.
 unmapped_columns_kept_in_staging:
   - zip_code
   - cross_street_name

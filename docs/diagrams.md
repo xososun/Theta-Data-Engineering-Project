@@ -15,7 +15,7 @@ Mermaid Support extension, and on GitHub when this file is viewed there.
 **Source:** [`diagrams/architecture.mmd`](diagrams/architecture.mmd)
 
 Covers: sources → ingestion → raw → staging → validation → harmonization
-→ curated Parquet → load → PostgreSQL → consumption, with Airflow as the
+→ curated gate → published Parquet → load → PostgreSQL → consumption, with Airflow as the
 orchestration layer, Docker Compose as the runtime, YAML as config, and
 Git as version control. Each box names the module that implements it.
 
@@ -30,9 +30,9 @@ flowchart TB
 
     subgraph ING["Ingestion — src/extract/, one extractor per source"]
         direction LR
-        A1["chicago_extractor.py<br/>byte-for-byte copy<br/>file check: UTF-8, header row"]
+        A1["chicago_extractor.py<br/>newest export in data/incoming/<br/>byte-for-byte copy · UTF-8 + header check<br/>SHA-256 = last batch → reuse, no copy"]
         A2["nyc_extractor.py<br/>retries + backoff · compound pagination<br/>90-day window ending at newest published date<br/>0 rows = failure"]
-        A3["uk_extractor.py<br/>per-year failure isolation<br/>file check: UTF-8, header row"]
+        A3["uk_extractor.py<br/>5 annual files · missing year fails run<br/>UTF-8 + header check<br/>SHA-256 = last batch → reuse, no copy"]
     end
 
     subgraph RAW["RAW Layer — source-faithful, never overwritten"]
@@ -52,12 +52,17 @@ flowchart TB
 
     subgraph HARM["Harmonization — src/transform/curated.py, all sources at once"]
         direction LR
-        H1["Parse timestamps · local time → UTC<br/>cast canonical types · crash_date_key<br/>(DST-ambiguous times excluded)"]
+        H1["Batches validated in this run<br/>strict date parsing · local time → UTC<br/>cast canonical types · crash_date_key<br/>(DST-ambiguous times excluded)<br/>writes CANDIDATE data/curated/_candidate/"]
+    end
+
+    subgraph VALC["Curated gate — src/validation/curated_checks.py"]
+        direction LR
+        V2["5 checks on the candidate<br/>schema &amp; types · unique keys across sources<br/>per-source row reconciliation<br/>timestamps &amp; date keys · partitions<br/>results → dq_run_log · any fail: nothing published"]
     end
 
     subgraph CUR["CURATED Layer — canonical schema (25 fields)"]
         direction LR
-        C1["Partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month=<br/>rebuilt each run"]
+        C1["publish: candidate swapped in<br/>Partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month="]
     end
 
     subgraph LOAD["Load — src/load/load_postgres.py"]
@@ -80,7 +85,7 @@ flowchart TB
 
     subgraph ORCH["Orchestration & Runtime"]
         direction LR
-        OR1["Apache Airflow — DAG crash_pipeline<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → load → quality_report<br/>weekly · 2 retries · report runs ALL_DONE"]
+        OR1["Apache Airflow — DAG crash_pipeline<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → validate_curated → publish<br/>→ load → quality_report<br/>weekly · 2 retries · report runs ALL_DONE"]
         OR2["Docker Compose<br/>postgres · airflow-webserver<br/>airflow-scheduler · pipeline"]
         OR3["YAML configs<br/>adapters · canonical schema"]
         OR4["Git / GitHub<br/>version control"]
@@ -96,10 +101,13 @@ flowchart TB
     R1 --> ST1
     ST1 --> V1
     V1 -->|"all sources pass"| H1
-    H1 --> C1
+    H1 -->|"candidate"| V2
+    V2 -->|"all checks pass"| C1
     C1 --> L1
     L1 --> O1
     V1 -->|"check results"| O1
+    V2 -->|"check results"| O1
+    ING -->|"source_freshness"| O1
     O1 --> O2
     O1 --> K1
     O1 --> K2
@@ -111,6 +119,7 @@ flowchart TB
     OR1 -. orchestrates .-> STG
     OR1 -. orchestrates .-> VAL
     OR1 -. orchestrates .-> HARM
+    OR1 -. orchestrates .-> VALC
     OR1 -. orchestrates .-> LOAD
     OR1 -. orchestrates .-> O2
     OR2 -. hosts .-> OR1
@@ -135,7 +144,7 @@ flowchart TB
     class S1,S2,S3 srcStyle
     class A1,A2,A3 ingStyle
     class R1 rawStyle
-    class V1 valStyle
+    class V1,V2 valStyle
     class ST1 stgStyle
     class H1,C1 curStyle
     class L1,O1,O2 outStyle
@@ -147,19 +156,26 @@ flowchart TB
 orchestration/runtime relationships (Airflow *schedules* the stages, it
 is not itself a data stage).
 
-- **File checks live in ingestion.** The Chicago and UK extractors
-  confirm each file is readable UTF-8 with a header row before copying
-  it; NYC treats an empty API result as a failure. There is no separate
-  raw-validation stage.
+- **File checks and freshness live in ingestion.** The Chicago and UK
+  extractors confirm each file is readable UTF-8 with a header row, and
+  compare its SHA-256 with the last raw batch: an unchanged file is not
+  copied again and the previous batch is reused. NYC treats an empty API
+  result as a failure. Each source writes a `source_freshness` row to
+  `dq_run_log`, so every run records whether new data arrived.
 - **Staging maps, validation gates.** `staging.py` applies each
   adapter's `field_mapping` and nulls sentinel values, leaving values as
   source-faithful text. `checks.py` then runs 8 checks per batch and
   writes every result to `dq_run_log`. Any `fail` stops the run before
   harmonization, so no partial data reaches curated or Postgres.
-- **Harmonization runs once, across all sources.** `curated.py` reads
-  the newest staged batch of every source, converts local time to UTC,
-  casts types and writes the partitioned Parquet. Its date formats and
-  types are set in code, not read from the YAML configs.
+- **Harmonization runs once, across all sources, and is audited before
+  anyone sees it.** `curated.py` reads the batches validated in this
+  run, converts local time to UTC, casts types and writes a *candidate*.
+  `curated_checks.py` then runs 5 checks on the combined result (schema
+  and types, unique keys across sources, per-source row reconciliation,
+  timestamps and date keys, partitions). Only if all pass is the
+  candidate published to `data/curated/fact_crash/`; otherwise nothing
+  is published or loaded (write-audit-publish). Date formats and types
+  are set in code, not read from the YAML configs.
 - **Postgres is loaded from the curated Parquet**, by an UPSERT on the
   natural key, so reruns update rows rather than duplicate them. The
   Parquet layer holds only the latest batch per source; Postgres keeps
@@ -174,7 +190,8 @@ is not itself a data stage).
 **Source:** [`diagrams/lineage.mmd`](diagrams/lineage.mmd)
 
 Traces each canonical `fact_crash` field back to its source column(s)
-across `chicago_us`, `nyc_us`, and `uk_stats19`, including the
+across `chicago_us`, `nyc_us`, and `uk_stats19` (including UK `city`,
+derived from the police force: "London" for Greater London), plus the
 `batch_id` → raw batch folder → `manifest.json` traceability chain.
 Structural nulls (fields a source cannot populate) are shown as dashed
 paths, matching the gap matrix in `docs/data_dictionary.md`.
@@ -234,7 +251,8 @@ flowchart LR
         UK12["— no crash_type field —"]
         UK13["— no primary_cause field —"]
         UK14["— no hit_and_run field —"]
-        UK15["— national dataset, no city —"]
+        UK16["police_force<br/>(1 Metropolitan, 48 City of London)"]
+        UK15["— outside Greater London: no city —"]
     end
 
     subgraph CANON["fact_crash — canonical curated table"]
@@ -310,6 +328,7 @@ flowchart LR
     UK7 --> F13
     UK8 --> F14
     UK9 --> F15
+    UK16 -->|"uk_city(): London"| F17
 
     %% Structural gaps (dashed = not populated by this source)
     NY8 -.->|"cannot populate 'serious'"| F6
@@ -324,7 +343,7 @@ flowchart LR
     UK12 -.->|"cannot populate"| F11
     UK13 -.->|"cannot populate"| F12
     UK14 -.->|"defaults to false"| F16
-    UK15 -.->|"city is null"| F17
+    UK15 -.->|"null outside London"| F17
 
     %% Row-level lineage chain
     F18 -.->|"every row carries"| L1
@@ -341,7 +360,7 @@ flowchart LR
     class CH1,CH2,CH3,CH4,CH5,CH6,CH7,CH8,CH9,CH10,CH11,CH12,CH13,CH14 chiStyle
     class NY1,NY2,NY3,NY4,NY5,NY6,NY7,NY15 nycStyle
     class NY8,NY9,NY10,NY11,NY12,NY13,NY14,UK10,UK11,UK12,UK13,UK14,UK15 gapStyle
-    class UK1,UK2,UK3,UK4,UK5,UK6,UK7,UK8,UK9 ukStyle
+    class UK1,UK2,UK3,UK4,UK5,UK6,UK7,UK8,UK9,UK16 ukStyle
     class F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12,F13,F14,F15,F16,F17,F18 canonStyle
     class L1,L2,L3 linStyle
 ```

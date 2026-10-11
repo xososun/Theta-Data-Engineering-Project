@@ -10,12 +10,26 @@ Shape:
                               |
                   (all three sources must succeed)
                               v
-    once:          harmonize -> load -> quality_report (ALL_DONE)
+    once:   harmonize -> validate_curated -> publish -> load -> quality_report
+                                                               (ALL_DONE)
 
 Why the fan-in: stage() and run_checks() work on one source's batch, but
-harmonize() reads the newest staged batch of EVERY source and rewrites the
+harmonize() combines the validated batch of EVERY source and rewrites the
 whole curated layer, and load() loads all of curated. Running those two
 per source would have three tasks rewriting the same folder at once.
+
+Write-audit-publish: harmonize writes a CANDIDATE curated dataset,
+validate_curated audits it (schema, unique keys, per-source row
+reconciliation, timestamps/date keys, partitions), and only then does
+publish swap it into the live location and load copy it into Postgres. A
+bug in the cross-source transformation fails validate_curated and never
+reaches the published Parquet or Postgres.
+
+What a scheduled run refreshes: NYC is pulled from its API every run.
+Chicago and UK are read from files a person places in data/incoming/; if
+those files have not been replaced, extract detects it (SHA-256 against
+the last raw batch), reuses the previous batch instead of copying the
+same file again, and records it in a source_freshness row in dq_run_log.
 
 The DAG is a scheduler only. Every task calls a function from src/, so
 each stage can also be run by hand (see README "Running stages manually").
@@ -37,7 +51,7 @@ from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.decorators import task, task_group
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, AirflowFailException
 from airflow.utils.state import TaskInstanceState
 from airflow.utils.trigger_rule import TriggerRule
 
@@ -71,6 +85,8 @@ CONFIG_DIR = "/opt/airflow/config/adapters"
 # NYC incremental runs re-pull a trailing window to pick up late
 # amendments (proposal section 9). The window ends at the newest date the
 # API has published (it lags behind today). Adjust here, not in the extractor.
+# A one-off backfill can override the window when triggering the DAG:
+#   airflow dags trigger crash_pipeline --conf '{"nyc_since": "2021-01-01", "nyc_until": "2025-12-31"}'
 NYC_TRAILING_WINDOW_DAYS = 90
 
 UK_YEARS = [2021, 2022, 2023, 2024, 2025]
@@ -109,32 +125,43 @@ with DAG(
     # -----------------------------------------------------------------
 
     @task
-    def extract(source_id: str) -> dict:
-        """Run this source's extractor; returns its batch_id for later tasks."""
+    def extract(source_id: str, **context) -> dict:
+        """
+        Run this source's extractor; returns its batch_id for later tasks.
+
+        Also records whether new data actually arrived, as a
+        `source_freshness` row in dq_run_log (see src/utils/freshness.py).
+        """
+        from utils.config import load_adapter_config
+        from utils.freshness import freshness_status, select_incoming_file
+
         config_path = f"{CONFIG_DIR}/{ADAPTER_FILES[source_id]}"
+        refresh_cfg = load_adapter_config(config_path).get("refresh", {})
+        conf = (context["dag_run"].conf or {}) if context.get("dag_run") else {}
 
         if source_id == "chicago_us":
             from extract.chicago_extractor import run
-            # Fails with a clear error if the CSV is not in data/incoming/.
-            # Deliberate: a missing source should fail visibly, not be skipped.
+            # Newest export in data/incoming/ (by the date in its file name),
+            # so replacing the export is all a refresh needs. CHICAGO_CSV
+            # still overrides. No matching file fails the task visibly.
+            input_path = os.environ.get("CHICAGO_CSV") or select_incoming_file(
+                INCOMING_ROOT, refresh_cfg.get("incoming_pattern", "Traffic_Crashes_-_Crashes_*.csv"))
             result = run(
-                input_path=os.environ.get(
-                    "CHICAGO_CSV",
-                    f"{INCOMING_ROOT}/Traffic_Crashes_-_Crashes_20260923.csv",
-                ),
+                input_path=str(input_path),
                 config_path=config_path,
                 raw_root=RAW_ROOT,
             )
         elif source_id == "nyc_us":
             from extract.nyc_extractor import latest_crash_date, run
-            from utils.config import load_adapter_config
             # NYC publishes with a lag, so anchor the window on the newest
             # date the API actually has, not on today.
             api = load_adapter_config(config_path)["api_endpoint"]
-            until = datetime.strptime(latest_crash_date(api), "%Y-%m-%d").date()
-            since = until - timedelta(days=NYC_TRAILING_WINDOW_DAYS)
-            log.info("[extract] nyc_us latest published date %s; window %s to %s",
-                     until, since, until)
+            latest = datetime.strptime(latest_crash_date(api), "%Y-%m-%d").date()
+            until = datetime.strptime(conf["nyc_until"], "%Y-%m-%d").date() if conf.get("nyc_until") else latest
+            since = (datetime.strptime(conf["nyc_since"], "%Y-%m-%d").date() if conf.get("nyc_since")
+                     else until - timedelta(days=NYC_TRAILING_WINDOW_DAYS))
+            log.info("[extract] nyc_us latest published date %s; window %s to %s%s",
+                     latest, since, until, " (backfill from run conf)" if conf.get("nyc_since") else "")
             result = run(
                 since=since.isoformat(),
                 until=until.isoformat(),
@@ -142,6 +169,8 @@ with DAG(
                 raw_root=RAW_ROOT,
                 max_rows=None,
             )
+            result.update(latest_published_date=latest.isoformat(),
+                          window_since=since.isoformat(), window_until=until.isoformat())
         elif source_id == "uk_stats19":
             from extract.uk_extractor import run
             result = run(
@@ -150,16 +179,32 @@ with DAG(
                 config_path=config_path,
                 raw_root=RAW_ROOT,
             )
+            # A missing or unreadable year must fail the run: otherwise the
+            # pipeline would publish 4 of 5 years as if they were complete.
+            # AirflowFailException skips retries: a missing file won't appear
+            # in two minutes.
+            if result["years_failed"]:
+                raise AirflowFailException(
+                    f"UK extract incomplete, years failed: {result['years_failed']}. "
+                    f"Check the files in data/incoming/."
+                )
         else:
             raise ValueError(f"Unknown source_id: {source_id}")
 
         # Extractors name the count differently (row_count vs total_rows).
-        row_count = result.get("row_count", result.get("total_rows", 0))
-        log.info("[extract] %s batch=%s rows=%s", source_id, result["batch_id"], row_count)
+        row_count = result.get("row_count", result.get("total_rows", 0)) or 0
+
+        # Record what this run actually refreshed.
+        from validation.checks import log_check
+        status, details = freshness_status(result, refresh_cfg)
+        log_check(source_id, result["batch_id"], "source_freshness", status, row_count, 0, details)
+        log.info("[extract] %s batch=%s rows=%s freshness=%s: %s",
+                 source_id, result["batch_id"], row_count, status, details)
         return {
             "source_id": source_id,
             "batch_id": result["batch_id"],
             "row_count": row_count,
+            "content_changed": result.get("content_changed", True),
         }
 
     @task
@@ -178,25 +223,41 @@ with DAG(
 
     @task_group(group_id="per_source")
     def per_source_branch(source_id: str):
-        validate(stage(extract(source_id)))
+        # The group returns validate()'s result, so harmonize receives the
+        # exact batch each source validated in this run.
+        return validate(stage(extract(source_id)))
 
     # -----------------------------------------------------------------
     # Fan-in tasks (run once, across all sources)
     # -----------------------------------------------------------------
 
-    # Default trigger rule (all_success), on purpose. stage() writes to
-    # data/staging/ BEFORE validate() runs, so a batch that failed its
-    # checks is still the newest batch on disk. A looser rule would let
-    # harmonize publish data that failed validation.
+    # Default trigger rule (all_success), on purpose: a failed source
+    # validation must stop the run. harmonize also reads exactly the
+    # batches validated in this run (not "newest on disk"), so a batch that
+    # failed validation in an earlier run can never be picked up.
     @task
-    def harmonize() -> dict:
-        """Staging -> curated: combine all sources into partitioned Parquet."""
+    def harmonize(validated: list[dict]) -> dict:
+        """Staging -> curated CANDIDATE: combine the validated batches."""
         from transform.curated import harmonize as run_harmonize
-        return run_harmonize()
+        batches = {v["source_id"]: v["batch_id"] for v in validated}
+        return run_harmonize(batches=batches)
+
+    # No retries, same reason as validate: a failed check is deterministic.
+    @task(retries=0)
+    def validate_curated(harmonize_result: dict) -> dict:
+        """Audit the curated candidate; raises (fails the task) on any 'fail'."""
+        from validation.curated_checks import run_curated_checks
+        return run_curated_checks(harmonize_result)
 
     @task
-    def load() -> dict:
-        """Curated -> PostgreSQL: idempotent UPSERT of fact_crash + dim_date."""
+    def publish(curated_checks_result: dict) -> dict:
+        """Swap the audited candidate into the live curated location."""
+        from transform.curated import publish as run_publish
+        return run_publish()
+
+    @task
+    def load(publish_result: dict) -> dict:
+        """Published curated -> PostgreSQL: idempotent UPSERT of fact_crash + dim_date."""
         from load.load_postgres import load as run_load
         return run_load()
 
@@ -230,5 +291,5 @@ with DAG(
             )
         return summary
 
-    per_source = per_source_branch.expand(source_id=SOURCES)
-    per_source >> harmonize() >> load() >> quality_report()
+    validated = per_source_branch.expand(source_id=SOURCES)
+    load(publish(validate_curated(harmonize(validated)))) >> quality_report()

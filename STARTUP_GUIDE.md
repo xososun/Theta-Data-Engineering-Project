@@ -60,6 +60,14 @@ Datasets are **not** in the repo (gitignored). Each person downloads them locall
 
 Put downloaded files in `data/incoming/` (host machine). This is the local drop zone.
 
+**Refreshing later.** Scheduled DAG runs fetch NYC themselves, but they
+can only use newer Chicago or UK data after you replace these files:
+save a new Chicago export with the portal's file name (the newest name
+is used automatically) or replace a revised UK annual file. Until then,
+each run reports Chicago/UK as `UNCHANGED` in the `source_freshness`
+rows of `dq_run_log` and reuses the previous raw batch. See README,
+"What a Scheduled Run Refreshes".
+
 ## 5. Run the extractors
 
 All commands run through the one-off `pipeline` service. They are written as **single-line commands** so they work unchanged in PowerShell, bash, or cmd (don't use `\` line continuation in PowerShell; it uses a backtick).
@@ -79,7 +87,7 @@ docker compose run --rm pipeline python src/extract/nyc_extractor.py --since 202
 
 Use `--help` on any extractor to see all options.
 
-Each successful run creates `data/raw/<source_id>/<batch_id>/` containing the raw data and a `manifest.json` (source, batch ID, retrieval timestamp). Batch folders look like `chicago_us_20261002T092840Z_9b8ac00a`.
+Each successful run with new content creates `data/raw/<source_id>/<batch_id>/` containing the raw data and a `manifest.json` (source, batch ID, retrieval timestamp, SHA-256 per file). Batch folders look like `chicago_us_20261002T092840Z_9b8ac00a`. Running the Chicago or UK extractor again on unchanged files reuses that batch instead of copying the files again; add `--force-new-batch` to override.
 
 **Check a batch's manifest** (replace with your real batch folder):
 
@@ -94,7 +102,7 @@ Quick sanity numbers from the real runs: Chicago 1,096,581 rows; UK 513,801 rows
 1. **Never put files in `data/raw/` by hand**, and never point `--input` / `--input-dir` at it. Raw means "an extractor produced this, with a manifest." Use `data/incoming/` for your own downloads.
 2. **Config lives in YAML, not code.** Field mappings, value translations and known data-quality issues are in `config/adapters/*.yaml`. Transformation code should read them, not hardcode per-source logic.
 3. **Don't commit `.env` or datasets.**
-4. **UK extractor fails per year, not all-or-nothing.** If a year is missing or ambiguous, the other years still succeed and the run exits non-zero. Read the output, don't just trust the exit code.
+4. **UK extractor checks every year.** Run by hand, it reports each missing or ambiguous year and exits non-zero. In the DAG, any missing year fails the run, so a partial UK load is never published.
 5. **NYC returning 0 rows is treated as a failure**, on purpose.
 6. **Structural nulls are not findings.** Some fields don't exist in some sources. Check the per-source gap table in `docs/data_dictionary.md` before interpreting any cross-city null pattern (especially Member C's EDA).
 

@@ -1,6 +1,6 @@
 # Data Contract: `fact_crash` (Curated Layer)
 
-**Version:** 1.1
+**Version:** 1.2
 **Status:** Active. Every guarantee below has been checked against the
 implementation (`sql/schema.sql`, `src/transform/`, `src/validation/checks.py`,
 `src/load/load_postgres.py`, `dags/crash_pipeline.py`).
@@ -46,9 +46,14 @@ validation → curated → PostgreSQL`), orchestrated by the Airflow DAG
 
 | `source_id` | Provider | Scope | Update cadence |
 |---|---|---|---|
-| `chicago_us` | City of Chicago Data Portal (Socrata) | City of Chicago, full published history | Bulk CSV export; refreshed by the portal on its own schedule, ingested on demand |
-| `nyc_us` | NYC OpenData (Socrata) | New York City, a 90-day window per run ending at the newest date the API has published | Live API pull; NYC publishes with a lag of several months, and crash reports can be amended after first publication |
-| `uk_stats19` | UK Department for Transport (data.gov.uk) | Great Britain (England, Scotland, Wales), published years 2021–2025 | One CSV per year; the DfT publishes annual files, and revisions to past years are occasionally released |
+| `chicago_us` | City of Chicago Data Portal (Socrata) | City of Chicago, full published history | Bulk CSV export placed in `data/incoming/` by a person. **Only as fresh as the newest export someone has saved there**; a scheduled run re-uses the previous batch if the file is unchanged |
+| `nyc_us` | NYC OpenData (Socrata) | New York City, a 90-day window per run ending at the newest date the API has published | Live API pull every run; NYC publishes with a lag of several months, and crash reports can be amended after first publication |
+| `uk_stats19` | UK Department for Transport (data.gov.uk) | Great Britain (England, Scotland, Wales), published years 2021–2025 | Five annual CSVs placed in `data/incoming/` by a person; the DfT publishes yearly with occasional revisions. **Only as fresh as the files there** |
+
+Every run records, per source, whether new data arrived: a
+`source_freshness` row in `dq_run_log` (NEW / UNCHANGED for the file
+sources, with the batch reused; window and publication lag for NYC).
+Consumers can read the freshness of what they are querying from there.
 
 Adding a source means adding a new adapter YAML (`config/adapters/*.yaml`)
 **and** a new section in this contract. A new source without a contract
@@ -67,7 +72,9 @@ them, and any row that doesn't is a producer bug.
 |---|---|---|
 | `crash_id` is globally unique across all sources | `fact_crash.crash_id` PRIMARY KEY | Constructed as `'{source_id}:{source_record_id}'`; collision across sources is impossible by construction, not by convention |
 | `(source_id, source_record_id)` is unique | `uq_fact_crash_source_natural_key` UNIQUE constraint + `uniqueness` check | This is the dedup key at load time; UPSERT relies on it |
-| `crash_timestamp_utc` is non-null and in UTC | NOT NULL; local time converted to UTC in `src/transform/curated.py` | Rows whose local time cannot be converted are excluded (see section 6) |
+| `crash_timestamp_utc` is non-null, in UTC, not before 2000-01-01 and not after the run | NOT NULL; local time converted to UTC in `src/transform/curated.py`; `curated_timestamp_check` | Rows whose local time cannot be converted are excluded (see section 6) |
+| `crash_date_key` is the UTC date of `crash_timestamp_utc` | `curated_timestamp_check` | It is **not** the local date; see section 5 |
+| `city` is the source's city, or `London` / null for `uk_stats19` | Adapter mapping | UK rows are `London` only for Greater London (police force 1 or 48) |
 | `severity` is one of `fatal`, `serious`, `minor`, `none`, `unknown` | CHECK constraint + `accepted_values` check | This is the canonical scale; source values are preserved separately in `source_severity_raw` |
 | `country` is `US` or `GB` | `CHAR(2) NOT NULL` + `accepted_values` check | Set by each adapter as a literal, never read from source data |
 | `source_id` matches a row in `dim_source` | FOREIGN KEY + `referential` check | Every row's source is registered |
@@ -77,16 +84,28 @@ them, and any row that doesn't is a producer bug.
 
 ### 3.2 Batch-level validation guarantee
 
-Every staged batch passes through 8 automated checks (`schema`,
-`nullability`, `uniqueness`, `accepted_values`, `range`, `date_logic`,
-`referential`, `row_count`) before it can reach the curated layer. Each
-result is written to `dq_run_log`.
+Data passes two validation gates before consumers can see it, and every
+result is written to `dq_run_log`:
+
+1. **Staging gate, per source.** 8 checks (`schema`, `nullability`,
+   `uniqueness`, `accepted_values`, `range`, `date_logic`, `referential`,
+   `row_count`) on each staged batch.
+2. **Curated gate, after harmonization.** 5 checks on the combined
+   candidate before it is published or loaded: `curated_schema_check`
+   (canonical fields and Parquet types), `curated_uniqueness_check`
+   (natural key and `crash_id` unique across all sources),
+   `curated_reconciliation_check` (per source: the validated batch is
+   present and is the only batch; staged = curated + excluded, exclusions
+   at most 0.1% with a 25-row minimum allowance), `curated_timestamp_check`
+   and `curated_partition_check` (each row in the year/month partition of
+   its timestamp; folders and file counts consistent).
 
 | Check outcome | Effect |
 |---|---|
 | `pass` | Batch proceeds |
 | `warn` | Batch proceeds; the flagged rows **are loaded**. Used for documented anomalies (e.g. implausible speed limits, one known Chicago timestamp inversion) |
-| `fail` | The validate task fails, and the **whole run stops before harmonize**. No row from any source reaches curated Parquet or `fact_crash` in that run; the previous load stays in place |
+| `fail` (staging) | The validate task fails, and the **whole run stops before harmonize**. No row from any source reaches curated Parquet or `fact_crash` in that run; the previous load stays in place |
+| `fail` (curated) | `validate_curated` fails, so **publish and load do not run**. The published Parquet and `fact_crash` keep the previous good data; the rejected candidate stays in `data/curated/_candidate/` for inspection |
 
 Validation is batch-level, not row-level: there is no quarantine. A single
 failing check blocks the entire batch rather than removing individual
@@ -114,7 +133,8 @@ rows.
 |---|---|---|
 | `data/raw/` | Byte-for-byte copy of source; manifest present; batches never overwritten | No schema stability. File names and layouts are internal and may change |
 | `data/staging/` | Each source mapped to canonical column names; sentinels nulled | Timestamps are still source-local strings; types not yet cast. Pipeline-internal |
-| `data/curated/` (Parquet) | Canonical schema (`config/canonical_schema.yaml`); UTC timestamps; partitioned by `source_id/year/month` | Holds **only the newest batch per source** — rebuilt from scratch each run. For NYC that means only the latest 90-day window |
+| `data/curated/fact_crash/` (Parquet) | Canonical schema (`config/canonical_schema.yaml`); UTC timestamps; partitioned by `source_id/year/month`; **passed the curated gate** before being published (write-audit-publish) | Holds **only the batches validated in the latest successful run** — rebuilt from scratch each run. For NYC that means only the latest 90-day window |
+| `data/curated/_candidate/` | Nothing: an unaudited candidate | Pipeline-internal; never read it as a consumer |
 | `fact_crash` (Postgres) | Everything in sections 3.1–3.4; accumulates every batch ever loaded | No query-latency SLA; this is a course project, not a production service |
 
 Because Parquet is rebuilt per run but Postgres accumulates, the two can
@@ -133,7 +153,7 @@ mislead any cross-city comparison.
 | Field | Structurally null for | Reason | Consumer guidance |
 |---|---|---|---|
 | `police_notified_timestamp_utc` | `nyc_us`, `uk_stats19` | Neither source has an equivalent field | Do not compute "time to police notification" across all sources; Chicago-only |
-| `city` | `uk_stats19` | National (GB-wide) dataset, not city-scoped | Any query grouping by `city` must either exclude `uk_stats19` or accept NULL as a legitimate category |
+| `city` | `uk_stats19` outside Greater London | National (GB-wide) dataset; only Greater London (police force 1 or 48) maps to a city, `London` | City-level analysis uses `city = 'London'` for the UK and excludes the null rows; never compare a city with all of Great Britain |
 | `severity = 'serious'` bucket | `nyc_us` | NYC has no categorical severity field, only injury/kill counts. It can derive `fatal`, `minor`, `none` — but not the serious/minor distinction Chicago and UK provide | A severity breakdown by source will show NYC missing the `serious` row entirely; this is not zero serious crashes |
 | `num_killed` | `uk_stats19` | STATS19 fatality detail lives in a separate Casualties table not ingested in this pipeline | Do not compute "fatal crash rate by killed-count" for UK; use `severity = 'fatal'` instead |
 | `crash_type` | `nyc_us`, `uk_stats19` | Neither source classifies crashes by physical type (rear-end, angle, sideswipe) | Only Chicago supports crash-type analysis in v1 |
@@ -172,6 +192,10 @@ data a consumer should know:
 
 Consumers should not assume these. Any code relying on them is fragile:
 
+- **No freshness guarantee for Chicago and UK.** Their data is only as
+  new as the files someone last placed in `data/incoming/`. A scheduled
+  run does not fetch them; it reports `UNCHANGED` in `source_freshness`
+  (a warning after 14 days for Chicago, 400 for the UK).
 - **Not every raw record reaches `fact_crash`.** Crashes timestamped in a
   daylight-saving transition hour are excluded during harmonization,
   because their UTC time cannot be determined: in autumn the 1:00–1:59 am
@@ -211,7 +235,7 @@ The project proposal (section 7) drafts a fuller data model than
 |---|---|---|
 | `dim_location` | Not implemented | Location is denormalized onto `fact_crash` (lat/lon + `has_valid_coordinates`). A separate dimension was deferred — coordinate cardinality is high and not currently a join target |
 | `fact_person` | Not implemented | STATS19 casualty detail lives in a separate file not ingested. Adding it means a new source file + adapter + contract section |
-| `fact_vehicle` | Not implemented | Same as above for STATS19; NYC has partial vehicle data via `vehicle_type_code_N` fields, kept in staging but not promoted |
+| `fact_vehicle` | Not implemented | Same as above for STATS19; NYC has partial vehicle data via `vehicle_type_code_N` fields, available in the raw layer but not promoted |
 | Row-level quarantine | Not implemented | Validation blocks whole batches instead (section 3.2) |
 | `source_local_timezone` on `fact_crash` | Not implemented; it's on `dim_source` | Local timezone is a property of the source, not per-crash |
 
@@ -260,3 +284,4 @@ acceptable outcome — the notebook is part of the change.
 |---|---|---|
 | (initial) | 1.0 | Draft written from `sql/schema.sql`, `config/canonical_schema.yaml`, `config/adapters/*.yaml`, `docs/data_dictionary.md`, and `docs/project_proposal.md`. Open items marked ⚠ pending the transformation layer. |
 | 2026-10-06 | 1.1 | Confirmed against the merged implementation. Replaced the row-level quarantine claim with the actual batch-level validation behavior (3.2). Removed the unimplemented "not in the future" rule. Corrected traceability to use `batch_id` (`source_row_raw_ref` is not populated). Updated the NYC window to "90 days ending at the newest published date". Documented the DST exclusion, the Parquet-vs-Postgres history difference, and verified idempotency. Resolved the rerun-window, quarantine, and partitioning open items. |
+| 2026-10-11 | 1.2 | Added the curated gate (5 checks after harmonization, before publish and load) and write-audit-publish to 3.2 and 3.5; harmonize now reads the batches validated in the same run. Timestamp guarantees (not in the future, UTC date key) now enforced by `curated_timestamp_check`. Recorded per-source refresh behaviour and `source_freshness` (section 2, section 6). UK `city` = `London` for Greater London. |

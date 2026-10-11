@@ -8,9 +8,9 @@ flowchart TB
 
     subgraph ING["Ingestion — src/extract/, one extractor per source"]
         direction LR
-        A1["chicago_extractor.py<br/>byte-for-byte copy<br/>file check: UTF-8, header row"]
+        A1["chicago_extractor.py<br/>newest export in data/incoming/<br/>byte-for-byte copy · UTF-8 + header check<br/>SHA-256 = last batch → reuse, no copy"]
         A2["nyc_extractor.py<br/>retries + backoff · compound pagination<br/>90-day window ending at newest published date<br/>0 rows = failure"]
-        A3["uk_extractor.py<br/>per-year failure isolation<br/>file check: UTF-8, header row"]
+        A3["uk_extractor.py<br/>5 annual files · missing year fails run<br/>UTF-8 + header check<br/>SHA-256 = last batch → reuse, no copy"]
     end
 
     subgraph RAW["RAW Layer — source-faithful, never overwritten"]
@@ -30,12 +30,17 @@ flowchart TB
 
     subgraph HARM["Harmonization — src/transform/curated.py, all sources at once"]
         direction LR
-        H1["Parse timestamps · local time → UTC<br/>cast canonical types · crash_date_key<br/>(DST-ambiguous times excluded)"]
+        H1["Batches validated in this run<br/>strict date parsing · local time → UTC<br/>cast canonical types · crash_date_key<br/>(DST-ambiguous times excluded)<br/>writes CANDIDATE data/curated/_candidate/"]
+    end
+
+    subgraph VALC["Curated gate — src/validation/curated_checks.py"]
+        direction LR
+        V2["5 checks on the candidate<br/>schema &amp; types · unique keys across sources<br/>per-source row reconciliation<br/>timestamps &amp; date keys · partitions<br/>results → dq_run_log · any fail: nothing published"]
     end
 
     subgraph CUR["CURATED Layer — canonical schema (25 fields)"]
         direction LR
-        C1["Partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month=<br/>rebuilt each run"]
+        C1["publish: candidate swapped in<br/>Partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month="]
     end
 
     subgraph LOAD["Load — src/load/load_postgres.py"]
@@ -58,7 +63,7 @@ flowchart TB
 
     subgraph ORCH["Orchestration & Runtime"]
         direction LR
-        OR1["Apache Airflow — DAG crash_pipeline<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → load → quality_report<br/>weekly · 2 retries · report runs ALL_DONE"]
+        OR1["Apache Airflow — DAG crash_pipeline<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → validate_curated → publish<br/>→ load → quality_report<br/>weekly · 2 retries · report runs ALL_DONE"]
         OR2["Docker Compose<br/>postgres · airflow-webserver<br/>airflow-scheduler · pipeline"]
         OR3["YAML configs<br/>adapters · canonical schema"]
         OR4["Git / GitHub<br/>version control"]
@@ -74,10 +79,13 @@ flowchart TB
     R1 --> ST1
     ST1 --> V1
     V1 -->|"all sources pass"| H1
-    H1 --> C1
+    H1 -->|"candidate"| V2
+    V2 -->|"all checks pass"| C1
     C1 --> L1
     L1 --> O1
     V1 -->|"check results"| O1
+    V2 -->|"check results"| O1
+    ING -->|"source_freshness"| O1
     O1 --> O2
     O1 --> K1
     O1 --> K2
@@ -89,6 +97,7 @@ flowchart TB
     OR1 -. orchestrates .-> STG
     OR1 -. orchestrates .-> VAL
     OR1 -. orchestrates .-> HARM
+    OR1 -. orchestrates .-> VALC
     OR1 -. orchestrates .-> LOAD
     OR1 -. orchestrates .-> O2
     OR2 -. hosts .-> OR1
@@ -113,7 +122,7 @@ flowchart TB
     class S1,S2,S3 srcStyle
     class A1,A2,A3 ingStyle
     class R1 rawStyle
-    class V1 valStyle
+    class V1,V2 valStyle
     class ST1 stgStyle
     class H1,C1 curStyle
     class L1,O1,O2 outStyle

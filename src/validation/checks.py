@@ -140,6 +140,10 @@ def _log_check(
             )
 
 
+# Public name: also used by curated_checks.py and the DAG's source_freshness rows.
+log_check = _log_check
+
+
 # ---------- Individual checks ----------
 
 def schema_check(df: pd.DataFrame, canonical: dict) -> tuple[str, int, int, str]:

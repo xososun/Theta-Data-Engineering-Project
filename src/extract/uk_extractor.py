@@ -20,6 +20,11 @@ the end, and the extractor exits non-zero only if at least one year failed
 rather than either silently succeeding or discarding 4 good years because
 1 was missing.
 
+Change detection: if every annual file is byte-identical (SHA-256) to the
+latest raw batch, no new raw copy is written and that batch_id is reused
+with content_changed=False (see src/utils/freshness.py). Replacing any
+year's file, or adding a year, produces a new batch.
+
 Usage:
     python uk_extractor.py --input-dir /path/to/uk_annual_files
     python uk_extractor.py --input-dir /path/to/files --years 2021,2022,2023,2024,2025
@@ -34,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.batch import new_batch_id
 from utils.config import load_adapter_config
+from utils.freshness import fingerprint, previous_batch_id, unchanged_batch
 from utils.raw_writer import write_raw_file_copy, write_manifest
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "adapters" / "uk.yaml"
@@ -81,7 +87,12 @@ def find_year_file(input_dir: Path, year: int, pattern: str) -> Path:
     )
 
 
-def run(input_dir: str, years: list[int], config_path: str, raw_root: str) -> dict:
+def _raw_name(year: int) -> str:
+    return f"collisions_{year}.csv"
+
+
+def run(input_dir: str, years: list[int], config_path: str, raw_root: str,
+        reuse_unchanged: bool = True) -> dict:
     config = load_adapter_config(config_path)
     source_id = config["source_id"]
     input_dir_path = Path(input_dir)
@@ -89,8 +100,34 @@ def run(input_dir: str, years: list[int], config_path: str, raw_root: str) -> di
     if not input_dir_path.is_dir():
         raise NotADirectoryError(f"--input-dir is not a directory: {input_dir_path}")
 
-    batch_id = new_batch_id(source_id)
     raw_root_path = Path(raw_root)
+
+    # Same bytes as the latest raw batch for every year -> nothing new.
+    # Only checked when all requested years are present; a missing year
+    # falls through to the normal path, which reports it.
+    if reuse_unchanged:
+        try:
+            located = {_raw_name(y): find_year_file(input_dir_path, y, FILENAME_PATTERN) for y in years}
+        except FileNotFoundError:
+            located = None
+        if located:
+            reused = unchanged_batch(raw_root_path, source_id, fingerprint(located))
+            if reused:
+                print(f"[uk_extractor] all {len(years)} annual files are unchanged since batch "
+                      f"{reused['batch_id']}; reusing it, no new raw copy written")
+                return {
+                    "batch_id": reused["batch_id"],
+                    "years_succeeded": list(years),
+                    "years_failed": [],
+                    "total_rows": reused["record_count"],
+                    "manifest_path": reused["manifest_path"],
+                    "content_changed": False,
+                    "content_first_ingested_utc": reused["content_first_ingested_utc"],
+                    "source_files": [p.name for p in located.values()],
+                }
+
+    prior_batch = previous_batch_id(raw_root_path, source_id)
+    batch_id = new_batch_id(source_id)
 
     entries = []
     failures = []
@@ -106,7 +143,7 @@ def run(input_dir: str, years: list[int], config_path: str, raw_root: str) -> di
                 source_id=source_id,
                 batch_id=batch_id,
                 raw_root=raw_root_path,
-                logical_name=f"collisions_{year}.csv",
+                logical_name=_raw_name(year),
             )
             entry["record_count"] = row_count
             entry["year"] = year
@@ -131,6 +168,8 @@ def run(input_dir: str, years: list[int], config_path: str, raw_root: str) -> di
             "years_requested": years,
             "years_succeeded": [e["year"] for e in entries],
             "years_failed": [f["year"] for f in failures],
+            "content_changed": True,
+            "previous_batch_id": prior_batch,
         },
     )
 
@@ -148,6 +187,9 @@ def run(input_dir: str, years: list[int], config_path: str, raw_root: str) -> di
         "years_failed": failures,
         "total_rows": total_rows,
         "manifest_path": str(manifest_path),
+        "content_changed": True,
+        "previous_batch_id": prior_batch,
+        "source_files": [Path(e["original_path"]).name for e in entries],
     }
 
 
@@ -158,12 +200,15 @@ def main():
                          help="Comma-separated years to ingest (default: 2021-2025)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--raw-root", default=str(DEFAULT_RAW_ROOT))
+    parser.add_argument("--force-new-batch", action="store_true",
+                        help="Write a new raw batch even if every file is unchanged")
     args = parser.parse_args()
 
     years = [int(y.strip()) for y in args.years.split(",")]
 
     try:
-        result = run(args.input_dir, years, args.config, args.raw_root)
+        result = run(args.input_dir, years, args.config, args.raw_root,
+                     reuse_unchanged=not args.force_new_batch)
     except NotADirectoryError as e:
         print(f"[uk_extractor] FAILED: {e}", file=sys.stderr)
         sys.exit(1)

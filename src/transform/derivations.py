@@ -83,6 +83,29 @@ def uk_crash_timestamp(row: dict) -> str:
     return combine_date_and_time(row.get("date"), row.get("time"))
 
 
+# STATS19 police_force codes whose areas together form Greater London:
+# 1 = Metropolitan Police (the 32 London boroughs), 48 = City of London
+# Police (the City). Source: DfT Road Accident Data user guide code list.
+# The text labels are accepted too, in case a file uses labels not codes.
+LONDON_POLICE_FORCES = {"1", "48", "metropolitan police", "city of london"}
+
+
+def uk_city(row: dict):
+    """'London' for collisions in Greater London, otherwise None.
+
+    STATS19 is national; this gives it one city-scale geography that can
+    be compared with Chicago and New York City. Other police force areas
+    do not correspond to a single city, so they stay null.
+    """
+    value = row.get("police_force")
+    if _is_missing(value):
+        return None
+    code = str(value).strip().lower()
+    if code.endswith(".0"):  # "1.0" if the column was ever read as float
+        code = code[:-2]
+    return "London" if code in LONDON_POLICE_FORCES else None
+
+
 def uk_has_valid_coordinates(row: dict, bbox: dict) -> bool:
     lat = _to_float(row.get("latitude"))
     lon = _to_float(row.get("longitude"))

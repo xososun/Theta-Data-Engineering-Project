@@ -107,3 +107,16 @@ def test_map_matches_int_keys_against_text_values():
     }
     result = _apply_field("severity", spec, df, ADAPTER_STUB)
     assert list(result) == ["fatal", "serious", "minor", "unknown"]
+
+
+@pytest.mark.parametrize("police_force, expected", [
+    ("1", "London"),             # Metropolitan Police
+    ("48", "London"),            # City of London Police
+    ("1.0", "London"),           # tolerate a float-formatted code
+    ("Metropolitan Police", "London"),
+    ("20", None),                # West Midlands: not London
+    ("", None),
+    (None, None),
+])
+def test_uk_city_is_london_only_for_met_and_city_police(police_force, expected):
+    assert derivations.uk_city({"police_force": police_force}) == expected

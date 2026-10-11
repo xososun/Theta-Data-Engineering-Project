@@ -18,7 +18,7 @@ separately in each adapter file (`adapters/chicago.yaml`, `adapters/nyc.yaml`,
 | `crash_timestamp_utc` | TIMESTAMPTZ | No | Crash date/time normalized to UTC from the source's local timezone.                    | ✅ | ✅ | ✅ |
 | `crash_date_key` | DATE (FK → `dim_date`) | No | This is the UTC Date. Date portion of `crash_timestamp_utc`, for date-dimension joins. | ✅ | ✅ | ✅ |
 | `police_notified_timestamp_utc` | TIMESTAMPTZ | Yes | When police were notified, UTC.                                                        | ✅ | ❌ no equivalent field | ❌ no equivalent field |
-| `city` | TEXT | Yes | City name. Null for national-scope sources.                                            | ✅ "Chicago" | ✅ "New York City" | ❌ national dataset, not city-scoped |
+| `city` | TEXT | Yes | City name. For the national UK source, "London" for Greater London (police force 1 or 48), otherwise null. | ✅ "Chicago" | ✅ "New York City" | ⚠ "London" for Greater London only; null elsewhere |
 | `country` | CHAR(2) | No | ISO 3166-1 alpha-2.                                                                    | ✅ "US" | ✅ "US" | ✅ "GB" |
 | `latitude` / `longitude` | DOUBLE PRECISION | Yes | Coordinates. Null if source had none, or a `(0,0)` sentinel was rejected.              | ⚠ 0.78% missing | ⚠ 0.7% missing, but 2.3% of present coords are sentinel `(0,0)` | ✅ ~0.01% missing, 0 sentinel rows |
 | `has_valid_coordinates` | BOOLEAN | No | True only if lat/lon are non-null, non-sentinel, and inside the source's bounding box. | ✅ derived | ✅ derived | ✅ derived |
@@ -49,7 +49,7 @@ These are the fields where at least one source cannot populate real data — wor
 - **`weather_condition` / `lighting_condition` / `posted_speed_limit_mph`** — null for NYC only.
 - **`num_killed`** — null for UK only.
 - **`hit_and_run`** — meaningful only for Chicago; always `false` elsewhere, so a "hit-and-run rate by city" query would misleadingly show 0% for NYC and UK.
-- **`city`** — null for UK, since it's a national, not city-scoped, dataset.
+- **`city`** — for the UK only Greater London rows have a city ("London", from police force codes 1 = Metropolitan Police and 48 = City of London Police); the rest of Great Britain is null. City-level comparisons use Chicago, New York City and London only.
 
 ## Known Per-Source Data-Quality Notes
 
