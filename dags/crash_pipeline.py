@@ -169,6 +169,11 @@ with DAG(
                 raw_root=RAW_ROOT,
                 max_rows=None,
             )
+            if not result["completed_fully"]:
+                raise RuntimeError(
+                    f"NYC extract incomplete: stopped after {result['total_rows']:,} rows "
+                    f"(batch {result['batch_id']}, manifest completed_fully=false)."
+                )
             result.update(latest_published_date=latest.isoformat(),
                           window_since=since.isoformat(), window_until=until.isoformat())
         elif source_id == "uk_stats19":
