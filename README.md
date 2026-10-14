@@ -714,6 +714,31 @@ never duplicates data:
 - **Host paths in commands.** Inside containers, always use
   `/opt/airflow/...` paths, not Windows or host paths.
 
+## AI Usage Acknowledgment
+
+This project used Claude (Anthropic) as a coding and design assistant across all three workstreams: 
+source profiling, the extractors and Docker/Airflow environment, schema and adapter design, 
+the staging transform, data-quality checks, the Parquet and PostgreSQL load, diagram source files, 
+the data contract, and analytics and documentation drafts. AI assistance does not remove our individual 
+responsibility to understand, verify, and defend all submitted work.
+
+**How we handled AI output**
+
+- **Drafts, not deliverables.** AI-assisted code, config, and documentation were run and checked against real data or a real environment before we treated them as finished.
+- **Failures are documented.** Where an AI-proposed approach was wrong or incomplete, we recorded what went wrong and how it was fixed. Examples include a Docker entrypoint workaround that missed the real root cause, and a lineage diagram that showed NYC `severity` as a direct mapping when it is derived.
+- **Design decisions were ours.** The canonical schema, adapter configs, DDL, partition key order, source date windows, and the decision to leave `fact_person`, `fact_vehicle`, and `dim_location` out of this version were reviewed and decided by team members.
+- **No fabricated results.** Figures in the report come from real runs. Anything not verified is stated as such in `README.md` or `TASKS.md`.
+
+**Per-member records**
+
+| Member | Workstream | Detailed record |
+|---|---|---|
+| Santos | Ingestion and environment | [`docs/ai_acknowledgment_member_a.md`](docs/ai_acknowledgment_member_a.md) |
+| Hermoso | Transformation, validation, and database | [`docs/ai_acknowledgement_member_b.md`](docs/ai_acknowledgement_member_b.md) |
+| Leyte | Orchestration, diagrams, and analytics | [`docs/ai_acknowledgement_member_c.md`](docs/ai_acknowledgement_member_c.md) |
+
+The project-wide summary is in [`docs/ai_acknowledgment_summary.md`](docs/ai_acknowledgment_summary.md).
+
 ## Future Improvements
 
 - Retrieve Chicago through its Socrata API instead of a manual bulk

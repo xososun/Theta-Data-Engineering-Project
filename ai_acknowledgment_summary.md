@@ -2,15 +2,9 @@
 
 Prepared for inclusion in the Final Technical Report (Section 14), per the
 course's Academic Integrity and Responsible Use of AI policy. This section
-applies project-wide; Member A's (Santos) workstream also has a detailed
-standalone record (`docs/ai_acknowledgment_member_a.md`) that this summary
+applies project-wide; All members' workstream also has a detailed
+standalone record (`docs/ai_acknowledgment_member_[a/b/c].md`) that this summary
 draws from and is consistent with.
-
-**Status: this is a template. The Member A section is complete and matches
-the repository as of 2026-10-14 (apart from the one item marked for Santos
-in the detailed record). The Member B (Hermoso) and Member C (Leyte)
-sections must be filled in by those members before this document is
-submitted** — do not submit with placeholder text still present.
 
 ---
 
@@ -19,8 +13,13 @@ submitted** — do not submit with placeholder text still present.
 This project made use of Claude (Anthropic) as a coding and design
 assistant across multiple workstreams: source data profiling, canonical
 schema and source-adapter design, PostgreSQL schema design, data
-ingestion and refresh detection, [transformation/validation — Member B to
-confirm], and [orchestration/diagrams/analytics — Member C to confirm].
+ingestion and refresh detection, transformation, validation, and database 
+loading (raw → staging → curated transform, 8 DQ checks, idempotent Postgres load, 
+partitioned Parquet), and orchestration, diagrams and analytics 
+(the Airflow DAG's task graph, trigger rules and retry policy; 
+the Mermaid source for the architecture, lineage and ERD diagrams; 
+the comparison-frame module and the DBSCAN clustering notebook; 
+the data contract document; and the analytics prose and section summaries).
 
 Consistent with the course policy, AI assistance does not remove
 individual responsibility for understanding, verifying, and being able to
