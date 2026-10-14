@@ -81,54 +81,90 @@ document for the full account.
 
 ## Member B (Hermoso) — Transformation, Validation & Database
 
-*[To be completed by Member B.]*
+Full detail: docs/ai_acknowledgment_member_b.md
 
-AI-assisted: *[list what was AI-generated or AI-assisted — e.g.
-transformation code implementing the adapter YAML mappings, data-quality
-check implementations, Parquet partitioning code, etc.]*
+AI-assisted: the config-driven staging transform and its per-source derivation 
+functions, the curated harmonization and partitioned Parquet writer, the eight 
+staging data-quality checks writing to dq_run_log, the Postgres loader with idempotent 
+UPSERT, the CSV/JSON/Parquet benchmark, the path and database helpers, the associated 
+unit tests, and the adapter changes needed to support the transform (source_id and 
+timezone literals, and moving complex derive blocks into named derive_fn functions). 
+The partition key order, the 5-year UK and NYC date windows, and the scope decision to 
+leave fact_person and fact_vehicle out of v1 were team decisions the AI did not make; 
+the detailed record lists these.
 
-Independently verified: *[state specifically what was tested against real
-data/a real database, and how — e.g. "ran the transformation pipeline
-against the real raw-layer batches Member A produced and confirmed N rows
-loaded into fact_crash with 0 constraint violations" rather than "it
-compiled."]*
+Independently verified: every module was run against the real raw batches, not just 
+reviewed. Raw-to-staged row counts match exactly (Chicago 1,096,581; UK 513,801; 
+NYC 1,793 in that run), and the eight checks across the three sources gave 22 pass, 
+2 warn, 0 fail, with both warnings being documented Chicago anomalies handled by 
+explicit configuration rather than by loosening the check. Re-running the load, and a 
+second full DAG run, left per-source row counts unchanged, which is the evidence for 
+idempotency. A filtered read of Chicago, March 2024 returned 8,924 rows without scanning 
+the full dataset. The curated gate was fault-tested by injecting a wrong UK date format: 
+all staging checks passed, the curated reconciliation check failed for the UK, and publish 
+and load did not run. The full Docker re-run after the instructor-feedback changes is 
+still open, so these figures come from the earlier full run plus the unit tests.
 
-Notable issues found and fixed during verification: *[if any AI-proposed
-approach turned out to be wrong, incomplete, or needed correction after
-testing, describe it honestly here, the same way Member A's section does
-— this is expected, not something to omit.]*
+Notable issues found and fixed: several AI-written first drafts failed on real data 
+and were root-caused during execution. The transform assumed adapter filenames 
+matched source IDs (chicago_us.yaml versus the real chicago.yaml). The adapters’ 
+pseudo-English derive expressions could not be evaluated, which led to the derive_fn 
+primitive. (0,0) sentinel coordinates (74 Chicago, 34 NYC) were first left as real points.
+pd.NaT reached Postgres as the string “NaT”. The first Parquet write failed on 
+mixed-type num_killed values. The date-logic check failed Chicago on one documented 
+anomaly until a per-source tolerance was added. The benchmark first showed Parquet
+reading slower than CSV, a cold-read artifact of Docker’s filesystem, and the report 
+was corrected after a warm re-run instead of being left mismatched to the numbers. 
+After instructor feedback, curated parsing was also made strict so a wrong date format 
+fails the run instead of silently swapping day and month, and 255 crashes inside 
+daylight-saving transition hours are now excluded and counted each run rather than 
+dropped silently.
+
 
 ## Member C (Leyte) — Orchestration, Diagrams & Analytics
 
-*[To be completed by Member C.]*
+Full detail: docs/ai_acknowledgment_member_c.md
 
-AI-assisted: *[list what was AI-generated or AI-assisted — e.g. the
-Airflow DAG, architecture/lineage/ERD diagrams, the data contract
-document, EDA/clustering notebooks, etc.]*
+AI-assisted: the Mermaid source code for the architecture, lineage and ERD diagrams, 
+and the draft of the data contract document, the analytics write-up, and the summary of 
+the sections. AI was also used as an aid while I was in a fix to generate a list of things 
+that needed to be done for my sections and to help me in writing the documentation. 
+All the artifacts that belonged to Leyte were created and decided by me, including the 
+Airflow DAG, the logic of the comparison-frame, the clustering notebooks, and the 
+content of the final diagram.
 
-Independently verified: *[state specifically what was tested — e.g. "ran
-the DAG in the real Airflow scheduler and confirmed all tasks completed
-with the expected dependencies/retries" or, if diagrams, "diagrams were
-checked against the actual implemented schema/pipeline, not an idealized
-version."]*
+Independently verified: the DAG's task graph, dependencies, retries, trigger rules 
+and schedule were verified against `tests/test_dag_imports.py`, which checks for 
+the order of tasks `harmonize → validate_curated → publish → load`, the dynamic mapping 
+of tasks per source, the `all_success` trigger rule on the curated gate, and the `ALL_DONE` 
+trigger rule on `quality_report`. The write-audit-publish workflow was verified from 
+the latest quality report, not just from looking at the code: Each source's 
+`curated_reconciliation_check` shows the batch validated in that run and the 
+precise staged = curated + excluded numbers; Chicago 1,096,581 = 1,096,395 + 186; 
+UK 513,801 = 513,732 + 69; NYC 20,537 = 20,537 + 0; and `curated_partition_check` 
+verifies 211 partition files among three sources, just as harmonize found. 
+The architecture and lineage diagrams were compared line by line to the code 
+they represent; `dags/crash_pipeline.py` and `src/transform/derivations.py`; 
+and the ERD to `sql/schema.sql`, not against an idealized form. 
+The analytics figures were re-created from the curated Parquet in `notebooks/clustering.ipynb`: 
+in the Chicago vs London, 2025 case, 26.3% of injury crashes are in hotspots 
+for London while 8.8% in Chicago; in the Chicago vs NYC, 2026 case, 16.5% for Chicago 
+compared to 6.2% in NYC. Stability of the hotspots was verified by running DBSCAN on 
+80% subsamples (three seeds per city): London 27.6-28.6%, Chicago 9.1-9.3% in the London case, 
+Chicago 16.9-17.7% in the NYC case, and NYC 8.2-9.5%.
 
-Notable issues found and fixed during verification: *[same as above —
-document real corrections, not just final state.]*
+Notable issues found and fixed: while the AI-drafted lineage diagram depicts the NYC `severity` 
+attribute as a direct mapping from a source column, NYC does not publish a categorical severity 
+attribute; analyzing the diagram based on `src/transform/derivations.py` revealed the mistake, 
+and I revised the diagram to depict `severity` as a derived attribute (`nyc_severity()`), 
+which is calculated based on the number of injuries and deaths. 
+The hotspots method section explains why DBSCAN should be used instead of k-means, 
+in that k-means presumes spherical clustering and *k* selection, 
+but the road network creates elongated hotspots along arterial roads, and most crashes 
+do not occur in hotspots. The comparison-frame rule defined in `comparison_frames.py` 
+(the same location, the same event type, the same period, and rate per 100,000 residents per year) 
+is responsible for excluding total numbers and Great Britain versus one city from the analysis, 
+and the notebook's Finding cell highlights that the two frames yield different shares 
+for Chicago and that shares are not comparable between the frames.
 
 ---
-
-## Submission Checklist for This Document
-
-- [x] Member A has resolved the two bracketed items in
-      `docs/ai_acknowledgment_member_a.md` (freshness code; unchanged-file
-      re-run)
-- [ ] Member B has replaced the bracketed placeholders above with real,
-      specific detail
-- [ ] Member C has replaced the bracketed placeholders above with real,
-      specific detail
-- [ ] No bracketed placeholder text remains anywhere in this document
-- [ ] Both files are committed under `docs/`, and `README.md` has an AI
-      acknowledgement section that matches them
-- [ ] Each member has read the other two sections, consistent with the
-      course's individual-accountability requirement for the technical
-      defense
