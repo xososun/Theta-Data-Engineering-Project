@@ -214,7 +214,7 @@ Documented structural gaps (for example, NYC has no posted speed limit)
 are encoded per source so they do not register as failures. One
 documented Chicago anomaly (a single row whose police-notification time
 precedes the crash) is tolerated explicitly. Implausible speed limits are
-flagged as `warn`, not rejected. Verified across all three sources: 22
+flagged as `warn`, not rejected. Verified across all three sources: 37
 pass, 2 warn, 0 fail.
 
 **Curated checks.** Passing staging checks does not prove the combined
