@@ -79,7 +79,7 @@ defense, so skim the other two sections even if they aren't yours.
    - [x] UK `city = "London"` for Greater London (police force 1 and 48) — adapter + `uk_city()` + tests
    - [x] Comparison frames shared by both notebooks (`notebooks/comparison_frames.py`): city geographies, injury crashes only, shared windows computed from the data, rates per 100k residents
    - [x] Clustering on matched frames with each city's density-relative hotspot threshold
-   - [ ] Re-run both notebooks on the real data and write the two *Finding* cells
+   - [x] Re-run both notebooks on the real data and write the two *Finding* cells
    - [ ] (Optional) NYC backfill run for a three-way 2021–2025 frame
 3. **What the weekly schedule refreshes**
    - [x] README section "What a Scheduled Run Refreshes"; data contract v1.2
@@ -87,11 +87,10 @@ defense, so skim the other two sections even if they aren't yours.
    - [x] `source_freshness` row per source per run in `dq_run_log` (NEW / UNCHANGED / API window and lag)
    - [x] A missing UK year fails the run
    - [x] Tests: `tests/test_freshness.py`
-- [ ] Full run in Docker on the real data; update README figures and `outputs/quality_report_*.md`
-- [ ] Reflect these changes in the final paper
+- [x] Full run in Docker on the real data; update README figures and `outputs/quality_report_*.md`
+- [x] Reflect these changes in the final paper
 
 ## Not Yet Assigned
 - [x] README updates as each workstream lands
-- [ ] Final technical report
-- [ ] Presentation slides
-- [ ] Individual Q&A prep (everyone, not delegable)
+- [x] Final technical report
+- [x] Presentation slides

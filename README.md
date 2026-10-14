@@ -22,7 +22,8 @@ This project builds that integration once, as a pipeline that:
 
 - ingests each source automatically and keeps a source-faithful raw copy;
 - translates each source into one shared schema through per-source YAML
-  adapters, so adding a city means adding a config file, not new code;
+  adapters, so adding a city means adding a config file, an extractor branch,
+  and date-format and time-zone entries in curated.py along with other things;
 - enforces automated data-quality checks and records every result;
 - produces a curated, cross-city crash table that analysts can query
   without knowing each source's quirks; and
