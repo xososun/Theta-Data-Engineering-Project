@@ -1,130 +1,104 @@
+%%{init: {"flowchart": {"nodeSpacing": 24, "rankSpacing": 36, "padding": 8}}}%%
 flowchart TB
-    subgraph SRC["Data Sources — 3 sources, 3 formats"]
+
+    %% ═════════ ROW 1 · INGEST ═════════
+    subgraph R1["① INGEST · Sources → Extract → RAW  (extract logs source_freshness → PostgreSQL)"]
         direction LR
-        S1["Chicago Traffic Crashes<br/>(bulk CSV, Socrata export)"]
-        S2["NYC Motor Vehicle Collisions<br/>(Socrata REST API → JSON)"]
-        S3["UK STATS19 Collisions<br/>(5 annual CSVs, 2021–2025)"]
+
+        S1["<b>Chicago Crashes</b><br/>bulk CSV<br/>(Socrata export)"]
+        S2["<b>NYC Collisions</b><br/>Socrata REST API<br/>→ JSON"]
+        S3["<b>UK STATS19</b><br/>5 annual CSVs<br/>2021–2025"]
+
+        A1["<b>chicago_extractor</b><br/>• newest export in data/incoming/<br/>• byte-for-byte copy<br/>• UTF-8 + header check<br/>• SHA-256 = last batch → reuse"]
+        A2["<b>nyc_extractor</b><br/>• retries + backoff<br/>• compound pagination<br/>• 90-day window to newest date<br/>• 0 rows = failure"]
+        A3["<b>uk_extractor</b><br/>• 5 annual files<br/>• missing year fails run<br/>• UTF-8 + header check<br/>• SHA-256 = last batch → reuse"]
+
+        RAW["<b>RAW</b> · never overwritten<br/>data/raw/source_id/batch_id/<br/>original files + manifest.json<br/>(retrieved_at_utc, sha256)"]
+
+        S1 --> A1
+        S2 --> A2
+        S3 --> A3
+        A1 --> RAW
+        A2 --> RAW
+        A3 --> RAW
     end
 
-    subgraph ING["Ingestion — src/extract/, one extractor per source"]
+    %% ═════════ ROW 2 · TRANSFORM + GATES ═════════
+    subgraph R2["② STAGE · VALIDATE · HARMONIZE"]
         direction LR
-        A1["chicago_extractor.py<br/>newest export in data/incoming/<br/>byte-for-byte copy · UTF-8 + header check<br/>SHA-256 = last batch → reuse, no copy"]
-        A2["nyc_extractor.py<br/>retries + backoff · compound pagination<br/>90-day window ending at newest published date<br/>0 rows = failure"]
-        A3["uk_extractor.py<br/>5 annual files · missing year fails run<br/>UTF-8 + header check<br/>SHA-256 = last batch → reuse, no copy"]
+
+        STG["<b>STAGING</b> · per source<br/>adapter field_mapping<br/>(from · literal · map · derive_fn)<br/>→ canonical columns<br/>null sentinels -1, (0,0) → null"]
+
+        G1{{"<b>GATE 1 · per batch</b><br/>8 checks: schema · nullability<br/>uniqueness · accepted values · range<br/>date logic · referential · row count<br/>results → dq_run_log<br/>any fail stops run"}}
+
+        HARM["<b>HARMONIZE</b> · all sources<br/>strict dates · local → UTC<br/>canonical types · crash_date_key<br/>DST-ambiguous excluded<br/>writes data/curated/_candidate/"]
+
+        G2{{"<b>GATE 2 · candidate</b><br/>5 checks: schema &amp; types<br/>unique keys across sources<br/>per-source row reconciliation<br/>timestamps &amp; date keys · partitions<br/>results → dq_run_log<br/>any fail: nothing published"}}
+
+        STG --> G1
+        G1 ==>|"all sources pass"| HARM
+        HARM --> G2
     end
 
-    subgraph RAW["RAW Layer — source-faithful, never overwritten"]
+    %% ═════════ ROW 3 · PUBLISH + SERVE ═════════
+    subgraph R3["③ PUBLISH · LOAD · SERVE"]
         direction LR
-        R1["data/raw/&lt;source_id&gt;/&lt;batch_id&gt;/<br/>original files + manifest.json<br/>(retrieved_at_utc · sha256 per file)"]
-    end
 
-    subgraph STG["STAGING Layer — src/transform/staging.py, per source"]
-        direction LR
-        ST1["Apply adapter field_mapping<br/>(from · literal · map · derive_fn)<br/>→ canonical column names<br/>null sentinels: -1 and (0,0) → null"]
-    end
+        CUR[["<b>CURATED</b> · 25 fields<br/>candidate swapped in<br/>partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month="]]
 
-    subgraph VAL["Validation — src/validation/checks.py, per batch"]
-        direction LR
-        V1["8 automated checks<br/>schema · nullability · uniqueness · accepted values<br/>range · date logic · referential · row count<br/>results → dq_run_log · any fail stops the run"]
-    end
+        LOAD["<b>LOAD</b><br/>UPSERT on<br/>(source_id, source_record_id)<br/>dim_date first,<br/>then fact_crash"]
 
-    subgraph HARM["Harmonization — src/transform/curated.py, all sources at once"]
-        direction LR
-        H1["Batches validated in this run<br/>strict date parsing · local time → UTC<br/>cast canonical types · crash_date_key<br/>(DST-ambiguous times excluded)<br/>writes CANDIDATE data/curated/_candidate/"]
-    end
+        DB[("<b>PostgreSQL</b><br/>fact_crash · dim_source<br/>dim_date · dq_run_log")]
 
-    subgraph VALC["Curated gate — src/validation/curated_checks.py"]
-        direction LR
-        V2["5 checks on the candidate<br/>schema &amp; types · unique keys across sources<br/>per-source row reconciliation<br/>timestamps &amp; date keys · partitions<br/>results → dq_run_log · any fail: nothing published"]
-    end
-
-    subgraph CUR["CURATED Layer — canonical schema (25 fields)"]
-        direction LR
-        C1["publish: candidate swapped in<br/>Partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month="]
-    end
-
-    subgraph LOAD["Load — src/load/load_postgres.py"]
-        direction LR
-        L1["UPSERT on (source_id, source_record_id)<br/>dim_date first, then fact_crash"]
-    end
-
-    subgraph OUT["Storage & Reporting"]
-        direction LR
-        O1[("PostgreSQL<br/>fact_crash · dim_source<br/>dim_date · dq_run_log")]
-        O2["quality_report.py<br/>data/quality_reports/*.md"]
-    end
-
-    subgraph CONS["Consumption"]
-        direction LR
+        RPT["<b>quality_report.py</b><br/>data/quality_reports/*.md"]
         K1["SQL queries<br/>(analyst)"]
         K2["EDA notebook<br/>temporal · severity"]
         K3["Clustering notebook<br/>DBSCAN hotspots"]
+
+        CUR --> LOAD --> DB
+        DB --> RPT
+        DB --> K1
+        DB --> K2
+        CUR --> K2
+        CUR --> K3
     end
 
-    subgraph ORCH["Orchestration & Runtime"]
+    %% ═════════ ROW 4 · RUNTIME ═════════
+    subgraph R4["④ ORCHESTRATION &amp; RUNTIME"]
         direction LR
-        OR1["Apache Airflow — DAG crash_pipeline<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → validate_curated → publish<br/>→ load → quality_report<br/>weekly · 2 retries · report runs ALL_DONE"]
-        OR2["Docker Compose<br/>postgres · airflow-webserver<br/>airflow-scheduler · pipeline"]
-        OR3["YAML configs<br/>adapters · canonical schema"]
-        OR4["Git / GitHub<br/>version control"]
+        OR1["<b>Apache Airflow</b> · DAG crash_pipeline<br/>weekly · 2 retries<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → validate_curated<br/>→ publish → load → quality_report (ALL_DONE)"]
+        OR2["<b>Docker Compose</b><br/>postgres · airflow-webserver<br/>airflow-scheduler · pipeline"]
+        OR3["<b>YAML configs</b><br/>adapters · canonical schema"]
+        OR4["<b>Git / GitHub</b><br/>version control"]
     end
 
-    %% Main data flow
-    S1 --> A1
-    S2 --> A2
-    S3 --> A3
-    A1 --> R1
-    A2 --> R1
-    A3 --> R1
-    R1 --> ST1
-    ST1 --> V1
-    V1 -->|"all sources pass"| H1
-    H1 -->|"candidate"| V2
-    V2 -->|"all checks pass"| C1
-    C1 --> L1
-    L1 --> O1
-    V1 -->|"check results"| O1
-    V2 -->|"check results"| O1
-    ING -->|"source_freshness"| O1
-    O1 --> O2
-    O1 --> K1
-    O1 --> K2
-    C1 --> K2
-    C1 --> K3
+    %% Row-to-row flow (subgraph-level links keep each row horizontal)
+    R1 ==>|"RAW batches"| R2
+    R2 ==>|"Gate 2 passes → publish"| R3
+    R3 -.- R4
 
-    %% Orchestration / runtime (dashed = wraps, not data flow)
-    OR1 -. orchestrates .-> ING
-    OR1 -. orchestrates .-> STG
-    OR1 -. orchestrates .-> VAL
-    OR1 -. orchestrates .-> HARM
-    OR1 -. orchestrates .-> VALC
-    OR1 -. orchestrates .-> LOAD
-    OR1 -. orchestrates .-> O2
-    OR2 -. hosts .-> OR1
-    OR2 -. hosts .-> O1
-    OR3 -. configures .-> ING
-    OR3 -. configures .-> STG
-    OR3 -. configures .-> VAL
-    OR4 -. versions .-> OR1
-    OR4 -. versions .-> OR3
+    %% ═════════ STYLES ═════════
+    classDef source  fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef extract fill:#fff8e1,stroke:#f57f17,color:#5d4037
+    classDef raw     fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef stage   fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef gate    fill:#ffebee,stroke:#c62828,stroke-width:3px,color:#b71c1c
+    classDef curated fill:#e0f7fa,stroke:#00838f,color:#006064
+    classDef store   fill:#ede7f6,stroke:#4527a0,color:#311b92
+    classDef consume fill:#fce4ec,stroke:#ad1457,color:#880e4f
+    classDef runtime fill:#eceff1,stroke:#455a64,stroke-dasharray:4 2,color:#263238
 
-    %% Styling: layers as filled bands
-    classDef srcStyle    fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
-    classDef ingStyle    fill:#fff8e1,stroke:#f57f17,stroke-width:1px
-    classDef rawStyle    fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px
-    classDef valStyle    fill:#ffebee,stroke:#c62828,stroke-width:1px
-    classDef stgStyle    fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px
-    classDef curStyle    fill:#e0f7fa,stroke:#00838f,stroke-width:1px
-    classDef outStyle    fill:#ede7f6,stroke:#4527a0,stroke-width:1px
-    classDef consStyle   fill:#fce4ec,stroke:#ad1457,stroke-width:1px
-    classDef orchStyle   fill:#eceff1,stroke:#455a64,stroke-width:1px,stroke-dasharray: 4 2
+    class S1,S2,S3 source
+    class A1,A2,A3 extract
+    class RAW raw
+    class STG stage
+    class G1,G2 gate
+    class HARM,CUR curated
+    class LOAD,DB,RPT store
+    class K1,K2,K3 consume
+    class OR1,OR2,OR3,OR4 runtime
 
-    class S1,S2,S3 srcStyle
-    class A1,A2,A3 ingStyle
-    class R1 rawStyle
-    class V1,V2 valStyle
-    class ST1 stgStyle
-    class H1,C1 curStyle
-    class L1,O1,O2 outStyle
-    class K1,K2,K3 consStyle
-    class OR1,OR2,OR3,OR4 orchStyle
+    style R1 fill:#fafafa,stroke:#9e9e9e
+    style R2 fill:#fafafa,stroke:#9e9e9e
+    style R3 fill:#fafafa,stroke:#9e9e9e
+    style R4 fill:#fafafa,stroke:#9e9e9e,stroke-dasharray:4 2

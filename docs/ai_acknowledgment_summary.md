@@ -119,7 +119,7 @@ document real corrections, not just final state.]*
 
 ## Submission Checklist for This Document
 
-- [ ] Member A has resolved the two bracketed items in
+- [x] Member A has resolved the two bracketed items in
       `docs/ai_acknowledgment_member_a.md` (freshness code; unchanged-file
       re-run)
 - [ ] Member B has replaced the bracketed placeholders above with real,

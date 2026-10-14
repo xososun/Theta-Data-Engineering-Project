@@ -1,166 +1,151 @@
-flowchart LR
-    subgraph CHI["chicago_us — bulk CSV"]
+%%{init: {"flowchart": {"nodeSpacing": 20, "rankSpacing": 30, "padding": 8}}}%%
+flowchart TB
+
+    %% ═════════ HOW TO READ ═════════
+    subgraph R0[" "]
         direction TB
-        CH1["CRASH_RECORD_ID"]
-        CH2["CRASH_DATE"]
-        CH3["DATE_POLICE_NOTIFIED"]
-        CH4["LATITUDE / LONGITUDE"]
-        CH5["MOST_SEVERE_INJURY"]
-        CH6["INJURIES_TOTAL"]
-        CH7["INJURIES_FATAL"]
-        CH8["NUM_UNITS"]
-        CH9["FIRST_CRASH_TYPE"]
-        CH10["PRIM_CONTRIBUTORY_CAUSE"]
-        CH11["WEATHER_CONDITION"]
-        CH12["LIGHTING_CONDITION"]
-        CH13["POSTED_SPEED_LIMIT"]
-        CH14["HIT_AND_RUN_I"]
+        LEG["<b>Column lineage → fact_crash (canonical curated table)</b><br/>Each card: source fields (left) → canonical fields (right)<br/>✗ = source cannot populate this field · red dashed box = source has no field in this card<br/>Colors: <b>Chicago</b> blue · <b>NYC</b> amber · <b>UK STATS19</b> green"]
     end
 
-    subgraph NYC["nyc_us — Socrata API (JSON)"]
+    %% ═════════ ROW 1 · IDENTITY + TRACEABILITY ═════════
+    subgraph R1[" "]
         direction TB
-        NY1["collision_id"]
-        NY2["crash_date + crash_time"]
-        NY3["latitude / longitude"]
-        NY4["number_of_persons_injured"]
-        NY5["number_of_pedestrians_killed<br/>+ number_of_cyclist_killed<br/>+ number_of_motorist_killed"]
-        NY15["number_of_persons_killed<br/>(aggregate, ~88% null)"]
-        NY6["vehicle_type_code1..5<br/>(non-null count)"]
-        NY7["contributing_factor_vehicle_1"]
-        NY8["— no categorical severity —<br/>derived from counts, no 'serious'"]
-        NY14["— no police_notified field —"]
-        NY9["— no crash_type field —"]
-        NY10["— no weather field —"]
-        NY11["— no lighting field —"]
-        NY12["— no speed_limit field —"]
-        NY13["— no hit_and_run field —"]
+
+        subgraph G1["Identity"]
+            direction LR
+            I1["<b>Chicago</b><br/>CRASH_RECORD_ID"]
+            I2["<b>NYC</b><br/>collision_id"]
+            I3["<b>UK</b><br/>collision_index"]
+            IC["<b>canonical</b><br/>crash_id = {source_id}:{source_record_id}<br/>source_record_id"]
+            I1 --> IC
+            I2 --> IC
+            I3 --> IC
+        end
+
+        subgraph G2["Row-level traceability"]
+            direction TB
+            L1["<b>batch_id</b><br/>every fact_crash row carries<br/>batch_id + source_record_id"]
+            L2["<b>data/raw/{source_id}/{batch_id}/</b><br/>original files<br/>record found by source_record_id"]
+            L3["<b>manifest.json</b><br/>retrieved_at_utc · file list<br/>sha256 per file"]
+            L1 --> L2 --> L3
+        end
     end
 
-    subgraph UK["uk_stats19 — 5 annual CSVs"]
+    %% ═════════ ROW 2 · TIME + LOCATION ═════════
+    subgraph R2[" "]
         direction TB
-        UK1["collision_index"]
-        UK2["date + time<br/>(DD/MM/YYYY)"]
-        UK3["latitude / longitude"]
-        UK4["collision_severity<br/>(1=fatal, 2=serious, 3=minor)"]
-        UK5["number_of_casualties"]
-        UK6["number_of_vehicles"]
-        UK7["weather_conditions<br/>(-1 → null)"]
-        UK8["light_conditions<br/>(-1 → null)"]
-        UK9["speed_limit<br/>(-1 → null)"]
-        UK10["— no police_notified field —"]
-        UK11["— no num_killed field —"]
-        UK12["— no crash_type field —"]
-        UK13["— no primary_cause field —"]
-        UK14["— no hit_and_run field —"]
-        UK16["police_force<br/>(1 Metropolitan, 48 City of London)"]
-        UK15["— outside Greater London: no city —"]
+
+        subgraph G3["Time"]
+            direction LR
+            T1["<b>Chicago</b><br/>crash time: CRASH_DATE<br/>police notified: DATE_POLICE_NOTIFIED"]
+            T2["<b>NYC</b><br/>crash time: crash_date + crash_time<br/>police notified: ✗ no field"]
+            T3["<b>UK</b><br/>crash time: date + time (DD/MM/YYYY)<br/>police notified: ✗ no field"]
+            TC["<b>canonical</b><br/>crash_timestamp_utc<br/>(local → UTC in curated.py)<br/>police_notified_timestamp_utc"]
+            T1 --> TC
+            T2 --> TC
+            T3 --> TC
+        end
+
+        subgraph G4["Location"]
+            direction LR
+            O1["<b>Chicago</b><br/>coordinates: LATITUDE / LONGITUDE<br/>city / country: not mapped"]
+            O2["<b>NYC</b><br/>coordinates: latitude / longitude<br/>city / country: not mapped"]
+            O3["<b>UK</b><br/>coordinates: latitude / longitude<br/>city: police_force (1 Metropolitan,<br/>48 City of London) → uk_city() = London<br/>✗ null outside Greater London"]
+            OC["<b>canonical</b><br/>latitude / longitude<br/>+ has_valid_coordinates<br/>city / country"]
+            O1 --> OC
+            O2 --> OC
+            O3 --> OC
+        end
     end
 
-    subgraph CANON["fact_crash — canonical curated table"]
+    %% ═════════ ROW 3 · SEVERITY + COUNTS ═════════
+    subgraph R3[" "]
         direction TB
-        F1["crash_id<br/>{source_id}:{source_record_id}"]
-        F2["source_record_id"]
-        F3["crash_timestamp_utc<br/>(local → UTC in curated.py)"]
-        F4["police_notified_timestamp_utc"]
-        F5["latitude / longitude<br/>+ has_valid_coordinates"]
-        F6["severity"]
-        F7["source_severity_raw"]
-        F8["num_injured_total"]
-        F9["num_killed"]
-        F10["num_vehicles_involved"]
-        F11["crash_type"]
-        F12["primary_cause"]
-        F13["weather_condition"]
-        F14["lighting_condition"]
-        F15["posted_speed_limit_mph"]
-        F16["hit_and_run"]
-        F17["city / country"]
-        F18["batch_id"]
+
+        subgraph G5["Severity"]
+            direction LR
+            V1["<b>Chicago</b><br/>severity + raw:<br/>MOST_SEVERE_INJURY"]
+            V2["<b>NYC</b><br/>severity: nyc_severity() from<br/>injured + killed counts<br/>✗ cannot populate 'serious'<br/>raw: persons_injured + persons_killed<br/>(aggregate, ~88% null)"]
+            V3["<b>UK</b><br/>severity + raw: collision_severity<br/>(1=fatal, 2=serious, 3=minor)"]
+            VC["<b>canonical</b><br/>severity<br/>source_severity_raw"]
+            V1 --> VC
+            V2 --> VC
+            V3 --> VC
+        end
+
+        subgraph G6["Counts"]
+            direction LR
+            N1["<b>Chicago</b><br/>injured: INJURIES_TOTAL<br/>killed: INJURIES_FATAL<br/>vehicles: NUM_UNITS"]
+            N2["<b>NYC</b><br/>injured: number_of_persons_injured<br/>killed: Σ pedestrians + cyclist<br/>+ motorist killed<br/>vehicles: non-null count of<br/>vehicle_type_code1..5"]
+            N3["<b>UK</b><br/>injured: number_of_casualties<br/>killed: ✗ no num_killed field<br/>vehicles: number_of_vehicles"]
+            NC["<b>canonical</b><br/>num_injured_total<br/>num_killed<br/>num_vehicles_involved"]
+            N1 --> NC
+            N2 --> NC
+            N3 --> NC
+        end
     end
 
-    subgraph LINEAGE["Row-level traceability"]
+    %% ═════════ ROW 4 · DESCRIPTORS + CONDITIONS ═════════
+    subgraph R4[" "]
         direction TB
-        L1["fact_crash.batch_id<br/>+ source_record_id"]
-        L2["data/raw/{source_id}/{batch_id}/<br/>original files<br/>(record found by source_record_id)"]
-        L3["manifest.json<br/>retrieved_at_utc · file list · sha256 per file"]
+
+        subgraph G7["Crash description"]
+            direction LR
+            D1["<b>Chicago</b><br/>crash_type: FIRST_CRASH_TYPE<br/>primary_cause: PRIM_CONTRIBUTORY_CAUSE<br/>hit_and_run: HIT_AND_RUN_I"]
+            D2["<b>NYC</b><br/>crash_type: ✗ no field<br/>primary_cause: contributing_factor_vehicle_1<br/>hit_and_run: ✗ no field → defaults false"]
+            D3["<b>UK</b><br/>crash_type: ✗ no field<br/>primary_cause: ✗ no field<br/>hit_and_run: ✗ no field → defaults false"]
+            DC["<b>canonical</b><br/>crash_type<br/>primary_cause<br/>hit_and_run"]
+            D1 --> DC
+            D2 --> DC
+            D3 --> DC
+        end
+
+        subgraph G8["Conditions"]
+            direction LR
+            W1["<b>Chicago</b><br/>weather: WEATHER_CONDITION<br/>lighting: LIGHTING_CONDITION<br/>speed limit: POSTED_SPEED_LIMIT"]
+            W2["<b>NYC</b><br/>✗ no weather field<br/>✗ no lighting field<br/>✗ no speed_limit field"]
+            W3["<b>UK</b><br/>weather: weather_conditions (-1 → null)<br/>lighting: light_conditions (-1 → null)<br/>speed limit: speed_limit (-1 → null)"]
+            WC["<b>canonical</b><br/>weather_condition<br/>lighting_condition<br/>posted_speed_limit_mph"]
+            W1 --> WC
+            W2 -.->|"cannot populate"| WC
+            W3 --> WC
+        end
     end
 
-    %% Chicago → canonical
-    CH1 --> F2
-    CH1 --> F1
-    CH2 --> F3
-    CH3 --> F4
-    CH4 --> F5
-    CH5 --> F6
-    CH5 --> F7
-    CH6 --> F8
-    CH7 --> F9
-    CH8 --> F10
-    CH9 --> F11
-    CH10 --> F12
-    CH11 --> F13
-    CH12 --> F14
-    CH13 --> F15
-    CH14 --> F16
+    %% Keep rows stacked in a grid (invisible links between rows)
+    R0 ~~~ R1
+    R1 ~~~ R2
+    R2 ~~~ R3
+    R3 ~~~ R4
 
-    %% NYC → canonical
-    NY1 --> F2
-    NY1 --> F1
-    NY2 --> F3
-    NY3 --> F5
-    NY4 --> F8
-    NY4 -->|"nyc_severity()"| F6
-    NY5 -->|"nyc_severity()"| F6
-    NY4 --> F7
-    NY15 --> F7
-    NY5 --> F9
-    NY6 --> F10
-    NY7 --> F12
+    %% ═════════ STYLES ═════════
+    classDef chi   fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef nyc   fill:#fff8e1,stroke:#f57f17,color:#5d4037
+    classDef uk    fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef gap   fill:#ffebee,stroke:#c62828,stroke-dasharray:3 2,color:#b71c1c
+    classDef canon fill:#e0f7fa,stroke:#00838f,stroke-width:2px,color:#006064
+    classDef lin   fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef legend fill:#fafafa,stroke:#9e9e9e,color:#263238
 
-    %% UK → canonical
-    UK1 --> F2
-    UK1 --> F1
-    UK2 --> F3
-    UK3 --> F5
-    UK4 --> F6
-    UK4 --> F7
-    UK5 --> F8
-    UK6 --> F10
-    UK7 --> F13
-    UK8 --> F14
-    UK9 --> F15
-    UK16 -->|"uk_city(): London"| F17
+    class I1,T1,O1,V1,N1,D1,W1 chi
+    class I2,T2,O2,V2,N2,D2 nyc
+    class I3,T3,O3,V3,N3,D3,W3 uk
+    class W2 gap
+    class IC,TC,OC,VC,NC,DC,WC canon
+    class L1,L2,L3 lin
+    class LEG legend
 
-    %% Structural gaps (dashed = not populated by this source)
-    NY8 -.->|"cannot populate 'serious'"| F6
-    NY14 -.->|"cannot populate"| F4
-    NY9 -.->|"cannot populate"| F11
-    NY10 -.->|"cannot populate"| F13
-    NY11 -.->|"cannot populate"| F14
-    NY12 -.->|"cannot populate"| F15
-    NY13 -.->|"defaults to false"| F16
-    UK10 -.->|"cannot populate"| F4
-    UK11 -.->|"cannot populate"| F9
-    UK12 -.->|"cannot populate"| F11
-    UK13 -.->|"cannot populate"| F12
-    UK14 -.->|"defaults to false"| F16
-    UK15 -.->|"null outside London"| F17
-
-    %% Row-level lineage chain
-    F18 -.->|"every row carries"| L1
-    L1 --> L2
-    L2 --> L3
-
-    classDef chiStyle   fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
-    classDef nycStyle   fill:#fff8e1,stroke:#f57f17,stroke-width:1px
-    classDef ukStyle    fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px
-    classDef canonStyle fill:#e0f7fa,stroke:#00838f,stroke-width:2px
-    classDef linStyle   fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px
-    classDef gapStyle   fill:#ffebee,stroke:#c62828,stroke-width:1px,stroke-dasharray: 3 2
-
-    class CH1,CH2,CH3,CH4,CH5,CH6,CH7,CH8,CH9,CH10,CH11,CH12,CH13,CH14 chiStyle
-    class NY1,NY2,NY3,NY4,NY5,NY6,NY7,NY15 nycStyle
-    class NY8,NY9,NY10,NY11,NY12,NY13,NY14,UK10,UK11,UK12,UK13,UK14,UK15 gapStyle
-    class UK1,UK2,UK3,UK4,UK5,UK6,UK7,UK8,UK9,UK16 ukStyle
-    class F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12,F13,F14,F15,F16,F17,F18 canonStyle
-    class L1,L2,L3 linStyle
+    %% Row wrappers invisible; group cards lightly outlined
+    style R0 fill:none,stroke:none
+    style R1 fill:none,stroke:none
+    style R2 fill:none,stroke:none
+    style R3 fill:none,stroke:none
+    style R4 fill:none,stroke:none
+    style G1 fill:#fafafa,stroke:#9e9e9e
+    style G2 fill:#fafafa,stroke:#9e9e9e
+    style G3 fill:#fafafa,stroke:#9e9e9e
+    style G4 fill:#fafafa,stroke:#9e9e9e
+    style G5 fill:#fafafa,stroke:#9e9e9e
+    style G6 fill:#fafafa,stroke:#9e9e9e
+    style G7 fill:#fafafa,stroke:#9e9e9e
+    style G8 fill:#fafafa,stroke:#9e9e9e

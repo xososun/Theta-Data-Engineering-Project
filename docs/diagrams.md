@@ -20,136 +20,110 @@ orchestration layer, Docker Compose as the runtime, YAML as config, and
 Git as version control. Each box names the module that implements it.
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 24, "rankSpacing": 36, "padding": 8}}}%%
 flowchart TB
-    subgraph SRC["Data Sources — 3 sources, 3 formats"]
+
+    %% ═════════ ROW 1 · INGEST ═════════
+    subgraph R1["① INGEST · Sources → Extract → RAW  (extract logs source_freshness → PostgreSQL)"]
         direction LR
-        S1["Chicago Traffic Crashes<br/>(bulk CSV, Socrata export)"]
-        S2["NYC Motor Vehicle Collisions<br/>(Socrata REST API → JSON)"]
-        S3["UK STATS19 Collisions<br/>(5 annual CSVs, 2021–2025)"]
+
+        S1["<b>Chicago Crashes</b><br/>bulk CSV<br/>(Socrata export)"]
+        S2["<b>NYC Collisions</b><br/>Socrata REST API<br/>→ JSON"]
+        S3["<b>UK STATS19</b><br/>5 annual CSVs<br/>2021–2025"]
+
+        A1["<b>chicago_extractor</b><br/>• newest export in data/incoming/<br/>• byte-for-byte copy<br/>• UTF-8 + header check<br/>• SHA-256 = last batch → reuse"]
+        A2["<b>nyc_extractor</b><br/>• retries + backoff<br/>• compound pagination<br/>• 90-day window to newest date<br/>• 0 rows = failure"]
+        A3["<b>uk_extractor</b><br/>• 5 annual files<br/>• missing year fails run<br/>• UTF-8 + header check<br/>• SHA-256 = last batch → reuse"]
+
+        RAW["<b>RAW</b> · never overwritten<br/>data/raw/source_id/batch_id/<br/>original files + manifest.json<br/>(retrieved_at_utc, sha256)"]
+
+        S1 --> A1
+        S2 --> A2
+        S3 --> A3
+        A1 --> RAW
+        A2 --> RAW
+        A3 --> RAW
     end
 
-    subgraph ING["Ingestion — src/extract/, one extractor per source"]
+    %% ═════════ ROW 2 · TRANSFORM + GATES ═════════
+    subgraph R2["② STAGE · VALIDATE · HARMONIZE"]
         direction LR
-        A1["chicago_extractor.py<br/>newest export in data/incoming/<br/>byte-for-byte copy · UTF-8 + header check<br/>SHA-256 = last batch → reuse, no copy"]
-        A2["nyc_extractor.py<br/>retries + backoff · compound pagination<br/>90-day window ending at newest published date<br/>0 rows = failure"]
-        A3["uk_extractor.py<br/>5 annual files · missing year fails run<br/>UTF-8 + header check<br/>SHA-256 = last batch → reuse, no copy"]
+
+        STG["<b>STAGING</b> · per source<br/>adapter field_mapping<br/>(from · literal · map · derive_fn)<br/>→ canonical columns<br/>null sentinels -1, (0,0) → null"]
+
+        G1{{"<b>GATE 1 · per batch</b><br/>8 checks: schema · nullability<br/>uniqueness · accepted values · range<br/>date logic · referential · row count<br/>results → dq_run_log<br/>any fail stops run"}}
+
+        HARM["<b>HARMONIZE</b> · all sources<br/>strict dates · local → UTC<br/>canonical types · crash_date_key<br/>DST-ambiguous excluded<br/>writes data/curated/_candidate/"]
+
+        G2{{"<b>GATE 2 · candidate</b><br/>5 checks: schema &amp; types<br/>unique keys across sources<br/>per-source row reconciliation<br/>timestamps &amp; date keys · partitions<br/>results → dq_run_log<br/>any fail: nothing published"}}
+
+        STG --> G1
+        G1 ==>|"all sources pass"| HARM
+        HARM --> G2
     end
 
-    subgraph RAW["RAW Layer — source-faithful, never overwritten"]
+    %% ═════════ ROW 3 · PUBLISH + SERVE ═════════
+    subgraph R3["③ PUBLISH · LOAD · SERVE"]
         direction LR
-        R1["data/raw/&lt;source_id&gt;/&lt;batch_id&gt;/<br/>original files + manifest.json<br/>(retrieved_at_utc · sha256 per file)"]
-    end
 
-    subgraph STG["STAGING Layer — src/transform/staging.py, per source"]
-        direction LR
-        ST1["Apply adapter field_mapping<br/>(from · literal · map · derive_fn)<br/>→ canonical column names<br/>null sentinels: -1 and (0,0) → null"]
-    end
+        CUR[["<b>CURATED</b> · 25 fields<br/>candidate swapped in<br/>partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month="]]
 
-    subgraph VAL["Validation — src/validation/checks.py, per batch"]
-        direction LR
-        V1["8 automated checks<br/>schema · nullability · uniqueness · accepted values<br/>range · date logic · referential · row count<br/>results → dq_run_log · any fail stops the run"]
-    end
+        LOAD["<b>LOAD</b><br/>UPSERT on<br/>(source_id, source_record_id)<br/>dim_date first,<br/>then fact_crash"]
 
-    subgraph HARM["Harmonization — src/transform/curated.py, all sources at once"]
-        direction LR
-        H1["Batches validated in this run<br/>strict date parsing · local time → UTC<br/>cast canonical types · crash_date_key<br/>(DST-ambiguous times excluded)<br/>writes CANDIDATE data/curated/_candidate/"]
-    end
+        DB[("<b>PostgreSQL</b><br/>fact_crash · dim_source<br/>dim_date · dq_run_log")]
 
-    subgraph VALC["Curated gate — src/validation/curated_checks.py"]
-        direction LR
-        V2["5 checks on the candidate<br/>schema &amp; types · unique keys across sources<br/>per-source row reconciliation<br/>timestamps &amp; date keys · partitions<br/>results → dq_run_log · any fail: nothing published"]
-    end
-
-    subgraph CUR["CURATED Layer — canonical schema (25 fields)"]
-        direction LR
-        C1["publish: candidate swapped in<br/>Partitioned Parquet<br/>data/curated/fact_crash/<br/>source_id= / year= / month="]
-    end
-
-    subgraph LOAD["Load — src/load/load_postgres.py"]
-        direction LR
-        L1["UPSERT on (source_id, source_record_id)<br/>dim_date first, then fact_crash"]
-    end
-
-    subgraph OUT["Storage & Reporting"]
-        direction LR
-        O1[("PostgreSQL<br/>fact_crash · dim_source<br/>dim_date · dq_run_log")]
-        O2["quality_report.py<br/>data/quality_reports/*.md"]
-    end
-
-    subgraph CONS["Consumption"]
-        direction LR
+        RPT["<b>quality_report.py</b><br/>data/quality_reports/*.md"]
         K1["SQL queries<br/>(analyst)"]
         K2["EDA notebook<br/>temporal · severity"]
         K3["Clustering notebook<br/>DBSCAN hotspots"]
+
+        CUR --> LOAD --> DB
+        DB --> RPT
+        DB --> K1
+        DB --> K2
+        CUR --> K2
+        CUR --> K3
     end
 
-    subgraph ORCH["Orchestration & Runtime"]
+    %% ═════════ ROW 4 · RUNTIME ═════════
+    subgraph R4["④ ORCHESTRATION &amp; RUNTIME"]
         direction LR
-        OR1["Apache Airflow — DAG crash_pipeline<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → validate_curated → publish<br/>→ load → quality_report<br/>weekly · 2 retries · report runs ALL_DONE"]
-        OR2["Docker Compose<br/>postgres · airflow-webserver<br/>airflow-scheduler · pipeline"]
-        OR3["YAML configs<br/>adapters · canonical schema"]
-        OR4["Git / GitHub<br/>version control"]
+        OR1["<b>Apache Airflow</b> · DAG crash_pipeline<br/>weekly · 2 retries<br/>per source (mapped ×3): extract → stage → validate<br/>then once: harmonize → validate_curated<br/>→ publish → load → quality_report (ALL_DONE)"]
+        OR2["<b>Docker Compose</b><br/>postgres · airflow-webserver<br/>airflow-scheduler · pipeline"]
+        OR3["<b>YAML configs</b><br/>adapters · canonical schema"]
+        OR4["<b>Git / GitHub</b><br/>version control"]
     end
 
-    %% Main data flow
-    S1 --> A1
-    S2 --> A2
-    S3 --> A3
-    A1 --> R1
-    A2 --> R1
-    A3 --> R1
-    R1 --> ST1
-    ST1 --> V1
-    V1 -->|"all sources pass"| H1
-    H1 -->|"candidate"| V2
-    V2 -->|"all checks pass"| C1
-    C1 --> L1
-    L1 --> O1
-    V1 -->|"check results"| O1
-    V2 -->|"check results"| O1
-    ING -->|"source_freshness"| O1
-    O1 --> O2
-    O1 --> K1
-    O1 --> K2
-    C1 --> K2
-    C1 --> K3
+    %% Row-to-row flow (subgraph-level links keep each row horizontal)
+    R1 ==>|"RAW batches"| R2
+    R2 ==>|"Gate 2 passes → publish"| R3
+    R3 -.- R4
 
-    %% Orchestration / runtime (dashed = wraps, not data flow)
-    OR1 -. orchestrates .-> ING
-    OR1 -. orchestrates .-> STG
-    OR1 -. orchestrates .-> VAL
-    OR1 -. orchestrates .-> HARM
-    OR1 -. orchestrates .-> VALC
-    OR1 -. orchestrates .-> LOAD
-    OR1 -. orchestrates .-> O2
-    OR2 -. hosts .-> OR1
-    OR2 -. hosts .-> O1
-    OR3 -. configures .-> ING
-    OR3 -. configures .-> STG
-    OR3 -. configures .-> VAL
-    OR4 -. versions .-> OR1
-    OR4 -. versions .-> OR3
+    %% ═════════ STYLES ═════════
+    classDef source  fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef extract fill:#fff8e1,stroke:#f57f17,color:#5d4037
+    classDef raw     fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef stage   fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef gate    fill:#ffebee,stroke:#c62828,stroke-width:3px,color:#b71c1c
+    classDef curated fill:#e0f7fa,stroke:#00838f,color:#006064
+    classDef store   fill:#ede7f6,stroke:#4527a0,color:#311b92
+    classDef consume fill:#fce4ec,stroke:#ad1457,color:#880e4f
+    classDef runtime fill:#eceff1,stroke:#455a64,stroke-dasharray:4 2,color:#263238
 
-    %% Styling: layers as filled bands
-    classDef srcStyle    fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
-    classDef ingStyle    fill:#fff8e1,stroke:#f57f17,stroke-width:1px
-    classDef rawStyle    fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px
-    classDef valStyle    fill:#ffebee,stroke:#c62828,stroke-width:1px
-    classDef stgStyle    fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px
-    classDef curStyle    fill:#e0f7fa,stroke:#00838f,stroke-width:1px
-    classDef outStyle    fill:#ede7f6,stroke:#4527a0,stroke-width:1px
-    classDef consStyle   fill:#fce4ec,stroke:#ad1457,stroke-width:1px
-    classDef orchStyle   fill:#eceff1,stroke:#455a64,stroke-width:1px,stroke-dasharray: 4 2
+    class S1,S2,S3 source
+    class A1,A2,A3 extract
+    class RAW raw
+    class STG stage
+    class G1,G2 gate
+    class HARM,CUR curated
+    class LOAD,DB,RPT store
+    class K1,K2,K3 consume
+    class OR1,OR2,OR3,OR4 runtime
 
-    class S1,S2,S3 srcStyle
-    class A1,A2,A3 ingStyle
-    class R1 rawStyle
-    class V1,V2 valStyle
-    class ST1 stgStyle
-    class H1,C1 curStyle
-    class L1,O1,O2 outStyle
-    class K1,K2,K3 consStyle
-    class OR1,OR2,OR3,OR4 orchStyle
+    style R1 fill:#fafafa,stroke:#9e9e9e
+    style R2 fill:#fafafa,stroke:#9e9e9e
+    style R3 fill:#fafafa,stroke:#9e9e9e
+    style R4 fill:#fafafa,stroke:#9e9e9e,stroke-dasharray:4 2
 ```
 
 **Reading this diagram:** Solid arrows are data flow; dashed arrows are
@@ -197,172 +171,157 @@ Structural nulls (fields a source cannot populate) are shown as dashed
 paths, matching the gap matrix in `docs/data_dictionary.md`.
 
 ```mermaid
-flowchart LR
-    subgraph CHI["chicago_us — bulk CSV"]
+%%{init: {"flowchart": {"nodeSpacing": 20, "rankSpacing": 30, "padding": 8}}}%%
+flowchart TB
+
+    %% ═════════ HOW TO READ ═════════
+    subgraph R0[" "]
         direction TB
-        CH1["CRASH_RECORD_ID"]
-        CH2["CRASH_DATE"]
-        CH3["DATE_POLICE_NOTIFIED"]
-        CH4["LATITUDE / LONGITUDE"]
-        CH5["MOST_SEVERE_INJURY"]
-        CH6["INJURIES_TOTAL"]
-        CH7["INJURIES_FATAL"]
-        CH8["NUM_UNITS"]
-        CH9["FIRST_CRASH_TYPE"]
-        CH10["PRIM_CONTRIBUTORY_CAUSE"]
-        CH11["WEATHER_CONDITION"]
-        CH12["LIGHTING_CONDITION"]
-        CH13["POSTED_SPEED_LIMIT"]
-        CH14["HIT_AND_RUN_I"]
+        LEG["<b>Column lineage → fact_crash (canonical curated table)</b><br/>Each card: source fields (left) → canonical fields (right)<br/>✗ = source cannot populate this field · red dashed box = source has no field in this card<br/>Colors: <b>Chicago</b> blue · <b>NYC</b> amber · <b>UK STATS19</b> green"]
     end
 
-    subgraph NYC["nyc_us — Socrata API (JSON)"]
+    %% ═════════ ROW 1 · IDENTITY + TRACEABILITY ═════════
+    subgraph R1[" "]
         direction TB
-        NY1["collision_id"]
-        NY2["crash_date + crash_time"]
-        NY3["latitude / longitude"]
-        NY4["number_of_persons_injured"]
-        NY5["number_of_pedestrians_killed<br/>+ number_of_cyclist_killed<br/>+ number_of_motorist_killed"]
-        NY15["number_of_persons_killed<br/>(aggregate, ~88% null)"]
-        NY6["vehicle_type_code1..5<br/>(non-null count)"]
-        NY7["contributing_factor_vehicle_1"]
-        NY8["— no categorical severity —<br/>derived from counts, no 'serious'"]
-        NY14["— no police_notified field —"]
-        NY9["— no crash_type field —"]
-        NY10["— no weather field —"]
-        NY11["— no lighting field —"]
-        NY12["— no speed_limit field —"]
-        NY13["— no hit_and_run field —"]
+
+        subgraph G1["Identity"]
+            direction LR
+            I1["<b>Chicago</b><br/>CRASH_RECORD_ID"]
+            I2["<b>NYC</b><br/>collision_id"]
+            I3["<b>UK</b><br/>collision_index"]
+            IC["<b>canonical</b><br/>crash_id = {source_id}:{source_record_id}<br/>source_record_id"]
+            I1 --> IC
+            I2 --> IC
+            I3 --> IC
+        end
+
+        subgraph G2["Row-level traceability"]
+            direction TB
+            L1["<b>batch_id</b><br/>every fact_crash row carries<br/>batch_id + source_record_id"]
+            L2["<b>data/raw/{source_id}/{batch_id}/</b><br/>original files<br/>record found by source_record_id"]
+            L3["<b>manifest.json</b><br/>retrieved_at_utc · file list<br/>sha256 per file"]
+            L1 --> L2 --> L3
+        end
     end
 
-    subgraph UK["uk_stats19 — 5 annual CSVs"]
+    %% ═════════ ROW 2 · TIME + LOCATION ═════════
+    subgraph R2[" "]
         direction TB
-        UK1["collision_index"]
-        UK2["date + time<br/>(DD/MM/YYYY)"]
-        UK3["latitude / longitude"]
-        UK4["collision_severity<br/>(1=fatal, 2=serious, 3=minor)"]
-        UK5["number_of_casualties"]
-        UK6["number_of_vehicles"]
-        UK7["weather_conditions<br/>(-1 → null)"]
-        UK8["light_conditions<br/>(-1 → null)"]
-        UK9["speed_limit<br/>(-1 → null)"]
-        UK10["— no police_notified field —"]
-        UK11["— no num_killed field —"]
-        UK12["— no crash_type field —"]
-        UK13["— no primary_cause field —"]
-        UK14["— no hit_and_run field —"]
-        UK16["police_force<br/>(1 Metropolitan, 48 City of London)"]
-        UK15["— outside Greater London: no city —"]
+
+        subgraph G3["Time"]
+            direction LR
+            T1["<b>Chicago</b><br/>crash time: CRASH_DATE<br/>police notified: DATE_POLICE_NOTIFIED"]
+            T2["<b>NYC</b><br/>crash time: crash_date + crash_time<br/>police notified: ✗ no field"]
+            T3["<b>UK</b><br/>crash time: date + time (DD/MM/YYYY)<br/>police notified: ✗ no field"]
+            TC["<b>canonical</b><br/>crash_timestamp_utc<br/>(local → UTC in curated.py)<br/>police_notified_timestamp_utc"]
+            T1 --> TC
+            T2 --> TC
+            T3 --> TC
+        end
+
+        subgraph G4["Location"]
+            direction LR
+            O1["<b>Chicago</b><br/>coordinates: LATITUDE / LONGITUDE<br/>city / country: not mapped"]
+            O2["<b>NYC</b><br/>coordinates: latitude / longitude<br/>city / country: not mapped"]
+            O3["<b>UK</b><br/>coordinates: latitude / longitude<br/>city: police_force (1 Metropolitan,<br/>48 City of London) → uk_city() = London<br/>✗ null outside Greater London"]
+            OC["<b>canonical</b><br/>latitude / longitude<br/>+ has_valid_coordinates<br/>city / country"]
+            O1 --> OC
+            O2 --> OC
+            O3 --> OC
+        end
     end
 
-    subgraph CANON["fact_crash — canonical curated table"]
+    %% ═════════ ROW 3 · SEVERITY + COUNTS ═════════
+    subgraph R3[" "]
         direction TB
-        F1["crash_id<br/>{source_id}:{source_record_id}"]
-        F2["source_record_id"]
-        F3["crash_timestamp_utc<br/>(local → UTC in curated.py)"]
-        F4["police_notified_timestamp_utc"]
-        F5["latitude / longitude<br/>+ has_valid_coordinates"]
-        F6["severity"]
-        F7["source_severity_raw"]
-        F8["num_injured_total"]
-        F9["num_killed"]
-        F10["num_vehicles_involved"]
-        F11["crash_type"]
-        F12["primary_cause"]
-        F13["weather_condition"]
-        F14["lighting_condition"]
-        F15["posted_speed_limit_mph"]
-        F16["hit_and_run"]
-        F17["city / country"]
-        F18["batch_id"]
+
+        subgraph G5["Severity"]
+            direction LR
+            V1["<b>Chicago</b><br/>severity + raw:<br/>MOST_SEVERE_INJURY"]
+            V2["<b>NYC</b><br/>severity: nyc_severity() from<br/>injured + killed counts<br/>✗ cannot populate 'serious'<br/>raw: persons_injured + persons_killed<br/>(aggregate, ~88% null)"]
+            V3["<b>UK</b><br/>severity + raw: collision_severity<br/>(1=fatal, 2=serious, 3=minor)"]
+            VC["<b>canonical</b><br/>severity<br/>source_severity_raw"]
+            V1 --> VC
+            V2 --> VC
+            V3 --> VC
+        end
+
+        subgraph G6["Counts"]
+            direction LR
+            N1["<b>Chicago</b><br/>injured: INJURIES_TOTAL<br/>killed: INJURIES_FATAL<br/>vehicles: NUM_UNITS"]
+            N2["<b>NYC</b><br/>injured: number_of_persons_injured<br/>killed: Σ pedestrians + cyclist<br/>+ motorist killed<br/>vehicles: non-null count of<br/>vehicle_type_code1..5"]
+            N3["<b>UK</b><br/>injured: number_of_casualties<br/>killed: ✗ no num_killed field<br/>vehicles: number_of_vehicles"]
+            NC["<b>canonical</b><br/>num_injured_total<br/>num_killed<br/>num_vehicles_involved"]
+            N1 --> NC
+            N2 --> NC
+            N3 --> NC
+        end
     end
 
-    subgraph LINEAGE["Row-level traceability"]
+    %% ═════════ ROW 4 · DESCRIPTORS + CONDITIONS ═════════
+    subgraph R4[" "]
         direction TB
-        L1["fact_crash.batch_id<br/>+ source_record_id"]
-        L2["data/raw/{source_id}/{batch_id}/<br/>original files<br/>(record found by source_record_id)"]
-        L3["manifest.json<br/>retrieved_at_utc · file list · sha256 per file"]
+
+        subgraph G7["Crash description"]
+            direction LR
+            D1["<b>Chicago</b><br/>crash_type: FIRST_CRASH_TYPE<br/>primary_cause: PRIM_CONTRIBUTORY_CAUSE<br/>hit_and_run: HIT_AND_RUN_I"]
+            D2["<b>NYC</b><br/>crash_type: ✗ no field<br/>primary_cause: contributing_factor_vehicle_1<br/>hit_and_run: ✗ no field → defaults false"]
+            D3["<b>UK</b><br/>crash_type: ✗ no field<br/>primary_cause: ✗ no field<br/>hit_and_run: ✗ no field → defaults false"]
+            DC["<b>canonical</b><br/>crash_type<br/>primary_cause<br/>hit_and_run"]
+            D1 --> DC
+            D2 --> DC
+            D3 --> DC
+        end
+
+        subgraph G8["Conditions"]
+            direction LR
+            W1["<b>Chicago</b><br/>weather: WEATHER_CONDITION<br/>lighting: LIGHTING_CONDITION<br/>speed limit: POSTED_SPEED_LIMIT"]
+            W2["<b>NYC</b><br/>✗ no weather field<br/>✗ no lighting field<br/>✗ no speed_limit field"]
+            W3["<b>UK</b><br/>weather: weather_conditions (-1 → null)<br/>lighting: light_conditions (-1 → null)<br/>speed limit: speed_limit (-1 → null)"]
+            WC["<b>canonical</b><br/>weather_condition<br/>lighting_condition<br/>posted_speed_limit_mph"]
+            W1 --> WC
+            W2 -.->|"cannot populate"| WC
+            W3 --> WC
+        end
     end
 
-    %% Chicago → canonical
-    CH1 --> F2
-    CH1 --> F1
-    CH2 --> F3
-    CH3 --> F4
-    CH4 --> F5
-    CH5 --> F6
-    CH5 --> F7
-    CH6 --> F8
-    CH7 --> F9
-    CH8 --> F10
-    CH9 --> F11
-    CH10 --> F12
-    CH11 --> F13
-    CH12 --> F14
-    CH13 --> F15
-    CH14 --> F16
+    %% Keep rows stacked in a grid (invisible links between rows)
+    R0 ~~~ R1
+    R1 ~~~ R2
+    R2 ~~~ R3
+    R3 ~~~ R4
 
-    %% NYC → canonical
-    NY1 --> F2
-    NY1 --> F1
-    NY2 --> F3
-    NY3 --> F5
-    NY4 --> F8
-    NY4 -->|"nyc_severity()"| F6
-    NY5 -->|"nyc_severity()"| F6
-    NY4 --> F7
-    NY15 --> F7
-    NY5 --> F9
-    NY6 --> F10
-    NY7 --> F12
+    %% ═════════ STYLES ═════════
+    classDef chi   fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef nyc   fill:#fff8e1,stroke:#f57f17,color:#5d4037
+    classDef uk    fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef gap   fill:#ffebee,stroke:#c62828,stroke-dasharray:3 2,color:#b71c1c
+    classDef canon fill:#e0f7fa,stroke:#00838f,stroke-width:2px,color:#006064
+    classDef lin   fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef legend fill:#fafafa,stroke:#9e9e9e,color:#263238
 
-    %% UK → canonical
-    UK1 --> F2
-    UK1 --> F1
-    UK2 --> F3
-    UK3 --> F5
-    UK4 --> F6
-    UK4 --> F7
-    UK5 --> F8
-    UK6 --> F10
-    UK7 --> F13
-    UK8 --> F14
-    UK9 --> F15
-    UK16 -->|"uk_city(): London"| F17
+    class I1,T1,O1,V1,N1,D1,W1 chi
+    class I2,T2,O2,V2,N2,D2 nyc
+    class I3,T3,O3,V3,N3,D3,W3 uk
+    class W2 gap
+    class IC,TC,OC,VC,NC,DC,WC canon
+    class L1,L2,L3 lin
+    class LEG legend
 
-    %% Structural gaps (dashed = not populated by this source)
-    NY8 -.->|"cannot populate 'serious'"| F6
-    NY14 -.->|"cannot populate"| F4
-    NY9 -.->|"cannot populate"| F11
-    NY10 -.->|"cannot populate"| F13
-    NY11 -.->|"cannot populate"| F14
-    NY12 -.->|"cannot populate"| F15
-    NY13 -.->|"defaults to false"| F16
-    UK10 -.->|"cannot populate"| F4
-    UK11 -.->|"cannot populate"| F9
-    UK12 -.->|"cannot populate"| F11
-    UK13 -.->|"cannot populate"| F12
-    UK14 -.->|"defaults to false"| F16
-    UK15 -.->|"null outside London"| F17
-
-    %% Row-level lineage chain
-    F18 -.->|"every row carries"| L1
-    L1 --> L2
-    L2 --> L3
-
-    classDef chiStyle   fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
-    classDef nycStyle   fill:#fff8e1,stroke:#f57f17,stroke-width:1px
-    classDef ukStyle    fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px
-    classDef canonStyle fill:#e0f7fa,stroke:#00838f,stroke-width:2px
-    classDef linStyle   fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px
-    classDef gapStyle   fill:#ffebee,stroke:#c62828,stroke-width:1px,stroke-dasharray: 3 2
-
-    class CH1,CH2,CH3,CH4,CH5,CH6,CH7,CH8,CH9,CH10,CH11,CH12,CH13,CH14 chiStyle
-    class NY1,NY2,NY3,NY4,NY5,NY6,NY7,NY15 nycStyle
-    class NY8,NY9,NY10,NY11,NY12,NY13,NY14,UK10,UK11,UK12,UK13,UK14,UK15 gapStyle
-    class UK1,UK2,UK3,UK4,UK5,UK6,UK7,UK8,UK9,UK16 ukStyle
-    class F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12,F13,F14,F15,F16,F17,F18 canonStyle
-    class L1,L2,L3 linStyle
+    %% Row wrappers invisible; group cards lightly outlined
+    style R0 fill:none,stroke:none
+    style R1 fill:none,stroke:none
+    style R2 fill:none,stroke:none
+    style R3 fill:none,stroke:none
+    style R4 fill:none,stroke:none
+    style G1 fill:#fafafa,stroke:#9e9e9e
+    style G2 fill:#fafafa,stroke:#9e9e9e
+    style G3 fill:#fafafa,stroke:#9e9e9e
+    style G4 fill:#fafafa,stroke:#9e9e9e
+    style G5 fill:#fafafa,stroke:#9e9e9e
+    style G6 fill:#fafafa,stroke:#9e9e9e
+    style G7 fill:#fafafa,stroke:#9e9e9e
+    style G8 fill:#fafafa,stroke:#9e9e9e
 ```
 
 **Reading this diagram:** Solid arrows are real field mappings from an
